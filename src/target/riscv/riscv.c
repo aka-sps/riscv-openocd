@@ -104,6 +104,9 @@
 #define DTMCONTROL_VERSION			(0xF)
 /**@}*/
 
+#define DEFAULT_COMMAND_TIMEOUT_SEC		(2)
+#define DEFAULT_RESET_TIMEOUT_SEC		(30)
+
 /** @name External handlers
 
 	@todo place in header
@@ -268,6 +271,23 @@ struct range_s {
 	uint16_t high;
 };
 typedef struct range_s range_t;
+
+struct trigger {
+	uint64_t address;
+	uint32_t length;
+	uint64_t mask;
+	uint64_t value;
+	bool read;
+	bool write;
+	bool execute;
+	int unique_id;
+};
+
+struct riscv_reg_info_s {
+	struct target *target;
+	unsigned custom_number;
+};
+typedef struct riscv_reg_info_s riscv_reg_info_t;
 
 static int
 register_get(struct reg *const reg);
@@ -1491,13 +1511,58 @@ riscv_supports_extension(struct target *const target,
 	return rvi->harts[hartid].misa & (1 << num);
 }
 
-/** Checks the state of the current hart -- "is_halted" checks the actual on-device register. */
+/**	Checks the state of the current hart 
+
+	-- "is_halted" checks the actual on-device register.
+
+	@bug Uncatched errors
+*/
 static bool
 riscv_is_halted(struct target *const target)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->is_halted);
-	return rvi->is_halted(target);
+	uint32_t dmstatus;
+
+	if (ERROR_OK != dmstatus_read(target, &dmstatus, true))
+		return false;
+
+	if (get_field(dmstatus, DMI_DMSTATUS_ANYUNAVAIL))
+		LOG_ERROR("%s: Hart %d is unavailable.", target_name(target), riscv_current_hartid(target));
+
+	if (get_field(dmstatus, DMI_DMSTATUS_ANYNONEXISTENT))
+		LOG_ERROR("%s: Hart %d doesn't exist.", target_name(target), riscv_current_hartid(target));
+
+	if (get_field(dmstatus, DMI_DMSTATUS_ANYHAVERESET)) {
+		int hartid = riscv_current_hartid(target);
+		LOG_INFO("%s: Hart %d unexpectedly reset!", target_name(target), hartid);
+		/**
+		@todo Can we make this more obvious to eg. a gdb user?
+		*/
+		uint32_t dmcontrol =
+			DMI_DMCONTROL_DMACTIVE |
+			DMI_DMCONTROL_ACKHAVERESET;
+
+		dmcontrol = set_hartsel(dmcontrol, hartid);
+
+		/* If we had been halted when we reset, request another halt. If we
+		* ended up running out of reset, then the user will (hopefully) get a
+		* message that a reset happened, that the target is running, and then
+		* that it is halted again once the request goes through.
+		*/
+		/**
+		@todo check current state but not last poll state
+		*/
+		if (TARGET_HALTED == target->state)
+			dmcontrol |= DMI_DMCONTROL_HALTREQ;
+
+		{
+			int const error_code = dmi_write(target, DMI_DMCONTROL, dmcontrol);
+
+			if (ERROR_OK != error_code)
+				return error_code;
+		}
+	}
+
+	return get_field(dmstatus, DMI_DMSTATUS_ALLHALTED);
 }
 
 /** Immediately write the new value to the requested register.
@@ -2196,16 +2261,13 @@ riscv_set_current_hartid(struct target *const target,
 	struct riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
-	if (!rvi->select_current_hart)
-		return ERROR_OK;
-
 	int const previous_hartid = riscv_current_hartid(target);
 	rvi->current_hartid = hartid;
 	assert(riscv_hart_enabled(target, hartid));
 	LOG_DEBUG("%s: setting hartid to %d, was %d", target_name(target), hartid, previous_hartid);
 
 	{
-		int const error_code = rvi->select_current_hart(target);
+		int const error_code = riscv_013_select_current_hart(target);
 
 		if (ERROR_OK != error_code)
 			return error_code;
@@ -3676,68 +3738,6 @@ riscv_013_set_register(struct target *const target, int hid, int rid, uint64_t v
 	return ERROR_OK;
 }
 
-/**
-@return error code
-@warning Trivial return always ERROR_OK
-*/
-static int
-__attribute__((const))
-riscv_013_on_halt(struct target *const target)
-{
-	return ERROR_OK;
-}
-
-/**
-@bug Uncatched errors
-*/
-static bool
-riscv_013_is_halted(struct target *const target)
-{
-	uint32_t dmstatus;
-
-	if (ERROR_OK != dmstatus_read(target, &dmstatus, true))
-		return false;
-
-	if (get_field(dmstatus, DMI_DMSTATUS_ANYUNAVAIL))
-		LOG_ERROR("%s: Hart %d is unavailable.", target_name(target), riscv_current_hartid(target));
-
-	if (get_field(dmstatus, DMI_DMSTATUS_ANYNONEXISTENT))
-		LOG_ERROR("%s: Hart %d doesn't exist.", target_name(target), riscv_current_hartid(target));
-
-	if (get_field(dmstatus, DMI_DMSTATUS_ANYHAVERESET)) {
-		int hartid = riscv_current_hartid(target);
-		LOG_INFO("%s: Hart %d unexpectedly reset!", target_name(target), hartid);
-		/**
-		@todo Can we make this more obvious to eg. a gdb user?
-		*/
-		uint32_t dmcontrol =
-			DMI_DMCONTROL_DMACTIVE |
-			DMI_DMCONTROL_ACKHAVERESET;
-
-		dmcontrol = set_hartsel(dmcontrol, hartid);
-
-		/* If we had been halted when we reset, request another halt. If we
-		* ended up running out of reset, then the user will (hopefully) get a
-		* message that a reset happened, that the target is running, and then
-		* that it is halted again once the request goes through.
-		*/
-		/**
-		@todo check current state but not last poll state
-		*/
-		if (TARGET_HALTED == target->state)
-			dmcontrol |= DMI_DMCONTROL_HALTREQ;
-
-		{
-			int const error_code = dmi_write(target, DMI_DMCONTROL, dmcontrol);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-	}
-
-	return get_field(dmstatus, DMI_DMSTATUS_ALLHALTED);
-}
-
 /**	@return error code */
 static int
 riscv_set_register_on_hart(struct target *const target,
@@ -3746,9 +3746,7 @@ riscv_set_register_on_hart(struct target *const target,
 	uint64_t const value)
 {
 	LOG_DEBUG("%s: [%d] %s <- %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), value);
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->set_register);
-	return rvi->set_register(target, hartid, regid, value);
+	return riscv_013_set_register(target, hartid, regid, value);
 }
 
 /**	@brief Count triggers, and initialize trigger_count for each hart.
@@ -4685,9 +4683,7 @@ riscv_halt_one_hart(struct target *const target, int const hartid)
 		return ERROR_OK;
 	}
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->halt_current_hart);
-	return rvi->halt_current_hart(target);
+	return riscv_013_halt_current_hart(target);
 }
 
 /**	Run control, possibly for multiple harts.
@@ -4738,8 +4734,7 @@ riscv_resume_one_hart(struct target *const target, int const hartid)
 		if (ERROR_OK != error_code)
 			return error_code;
 	}
-	assert(rvi->resume_current_hart);
-	return rvi->resume_current_hart(target);
+	return riscv_013_resume_current_hart(target);
 }
 
 /**	Run control, possibly for multiple harts.
@@ -6201,17 +6196,7 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 	struct riscv_info_t *const generic_info = target->arch_info;
 	assert(generic_info);
 
-	generic_info->get_register = &riscv_013_get_register;
-	generic_info->set_register = &riscv_013_set_register;
-	generic_info->select_current_hart = &riscv_013_select_current_hart;
-	generic_info->is_halted = &riscv_013_is_halted;
-	generic_info->halt_current_hart = &riscv_013_halt_current_hart;
-	generic_info->resume_current_hart = &riscv_013_resume_current_hart;
-	generic_info->step_current_hart = &riscv_013_step_current_hart;
-	generic_info->on_halt = &riscv_013_on_halt;
 	generic_info->on_resume = &riscv_013_on_resume;
-	generic_info->on_step = &riscv_013_on_step;
-	generic_info->halt_reason = &riscv_013_halt_reason;
 	generic_info->read_debug_buffer = &riscv_013_read_debug_buffer;
 	generic_info->write_debug_buffer = &riscv_013_write_debug_buffer;
 	generic_info->execute_debug_buffer = &riscv_013_execute_debug_buffer;
@@ -6219,12 +6204,6 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 	generic_info->fill_dmi_read_u64 = &riscv_013_fill_dmi_read_u64;
 	generic_info->fill_dmi_nop_u64 = &riscv_013_fill_dmi_nop_u64;
 	generic_info->dmi_write_u64_bits = &riscv_013_dmi_write_u64_bits;
-	generic_info->authdata_read = &riscv_013_authdata_read;
-	generic_info->authdata_write = &riscv_013_authdata_write;
-	generic_info->dmi_read = &dmi_read;
-	generic_info->dmi_write = &dmi_write;
-	generic_info->test_sba_config_reg = &riscv_013_test_sba_config_reg;
-	generic_info->test_compliance = &riscv_013_test_compliance;
 	generic_info->version_specific = calloc(1, sizeof(riscv_013_info_t));
 
 	if (!generic_info->version_specific) {
@@ -7177,9 +7156,6 @@ riscv_poll_hart(struct target *const target,
 	if (TARGET_HALTED != target->state && halted) {
 		LOG_DEBUG("%s:  triggered a halt",
 			target_name(target));
-		struct riscv_info_t const *const rvi = riscv_info(target);
-		assert(rvi && rvi->on_halt);
-		rvi->on_halt(target);
 		return RPH_DISCOVERED_HALTED;
 	} else if (target->state != TARGET_RUNNING && !halted) {
 		LOG_DEBUG("%s:  triggered running", target_name(target));
@@ -7369,26 +7345,20 @@ riscv_step_rtos_hart(struct target *const target)
 	}
 
 	riscv_invalidate_register_cache(target);
-	assert(rvi->on_step);
-	rvi->on_step(target);
+	riscv_013_on_step(target);
 
 	{
-		assert(rvi->step_current_hart);
-		int const error_code = rvi->step_current_hart(target);
+		int const error_code = riscv_013_step_current_hart(target);
 
 		if (ERROR_OK != error_code)
 			return error_code;
 	}
 
 	riscv_invalidate_register_cache(target);
-	{
-		assert(rvi->on_halt);
-		int const error_code = rvi->on_halt(target);
 
-		if (!riscv_is_halted(target)) {
-			LOG_ERROR("%s: Hart was not halted after single step!", target_name(target));
-			return ERROR_OK != error_code ? error_code : ERROR_TARGET_NOT_HALTED;
-		}
+	if (!riscv_is_halted(target)) {
+		LOG_ERROR("%s: Hart was not halted after single step!", target_name(target));
+		return ERROR_TARGET_NOT_HALTED;
 	}
 
 	return ERROR_OK;
@@ -7548,17 +7518,7 @@ COMMAND_HANDLER(riscv_test_compliance)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (rvi->test_compliance) {
-		return rvi->test_compliance(target);
-	} else {
-		LOG_ERROR("%s: This target does not support this command"
-				" (may implement an older version of the spec).",
-				target_name(target));
-		return ERROR_TARGET_INVALID;
-	}
+	return riscv_013_test_compliance(target);
 }
 
 COMMAND_HANDLER(riscv_set_prefer_sba)
@@ -7705,11 +7665,11 @@ COMMAND_HANDLER(riscv_authdata_read)
 		return ERROR_TARGET_INVALID;
 	}
 
-	if (rvi->authdata_read) {
+	{
 		uint32_t value;
 
 		{
-			int const error_code = rvi->authdata_read(target, &value);
+			int const error_code = riscv_013_authdata_read(target, &value);
 
 			if (ERROR_OK != error_code)
 				return error_code;
@@ -7717,9 +7677,6 @@ COMMAND_HANDLER(riscv_authdata_read)
 
 		command_print(CMD_CTX, "0x%" PRIx32, value);
 		return ERROR_OK;
-	} else {
-		LOG_ERROR("%s: authdata_read is not implemented for this target.", target_name(target));
-		return ERROR_TARGET_INVALID;
 	}
 }
 
@@ -7735,15 +7692,7 @@ COMMAND_HANDLER(riscv_authdata_write)
 	uint32_t value;
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], value);
 
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (rvi->authdata_write) {
-		return rvi->authdata_write(target, value);
-	} else {
-		LOG_ERROR("%s: authdata_write is not implemented for this target.", target_name(target));
-		return ERROR_TARGET_INVALID;
-	}
+	return riscv_013_authdata_write(target, value);
 }
 
 COMMAND_HANDLER(riscv_dmi_read)
@@ -7767,13 +7716,13 @@ COMMAND_HANDLER(riscv_dmi_read)
 		return ERROR_TARGET_INVALID;
 	}
 
-	if (rvi->dmi_read) {
+	{
 		uint32_t address;
 		uint32_t value;
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[0], address);
 
 		{
-			int const error_code = rvi->dmi_read(target, &value, address);
+			int const error_code = dmi_read(target, &value, address);
 
 			if (ERROR_OK != error_code)
 				return error_code;
@@ -7781,9 +7730,6 @@ COMMAND_HANDLER(riscv_dmi_read)
 
 		command_print(CMD_CTX, "0x%" PRIx32, value);
 		return ERROR_OK;
-	} else {
-		LOG_ERROR("%s: dmi_read is not implemented for this target.", target_name(target));
-		return ERROR_TARGET_INVALID;
 	}
 }
 
@@ -7802,15 +7748,7 @@ COMMAND_HANDLER(riscv_dmi_write)
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], value);
 
 	struct target *const target = get_current_target(CMD_CTX);
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (rvi->dmi_write) {
-		return rvi->dmi_write(target, address, value);
-	} else {
-		LOG_ERROR("%s: dmi_write is not implemented for this target.", target_name(target));
-		return ERROR_TARGET_INVALID;
-	}
+	return dmi_write(target, address, value);
 }
 
 COMMAND_HANDLER(riscv_test_sba_config_reg)
@@ -7836,13 +7774,8 @@ COMMAND_HANDLER(riscv_test_sba_config_reg)
 	struct riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
-	if (rvi->test_sba_config_reg) {
-		return
-			rvi->test_sba_config_reg(target, legal_address, num_words, illegal_address, run_sbbusyerror_test);
-	} else {
-		LOG_ERROR("%s: test_sba_config_reg is not implemented for this target.", target_name(target));
-		return ERROR_TARGET_INVALID;
-	}
+	return
+		riscv_013_test_sba_config_reg(target, legal_address, num_words, illegal_address, run_sbbusyerror_test);
 }
 
 static struct command_registration const riscv_exec_command_handlers[] = {
@@ -8055,12 +7988,10 @@ riscv_get_register_on_hart(struct target *const target,
 	int const hartid,
 	enum gdb_regno const regid)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
-
 	if (riscv_current_hartid(target) != hartid)
 		riscv_invalidate_register_cache(target);
 
-	int const err = rvi->get_register(target, value, hartid, regid);
+	int const err = riscv_013_get_register(target, value, hartid, regid);
 
 	if (riscv_current_hartid(target) != hartid)
 		riscv_invalidate_register_cache(target);
@@ -8074,8 +8005,6 @@ enum riscv_halt_reason
 	riscv_halt_reason(struct target *const target,
 		int const hartid)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
-
 	if (ERROR_OK != riscv_set_current_hartid(target, hartid))
 		return RISCV_HALT_ERROR;
 
@@ -8084,7 +8013,7 @@ enum riscv_halt_reason
 		return RISCV_HALT_UNKNOWN;
 	}
 
-	return rvi->halt_reason(target);
+	return riscv_013_halt_reason(target);
 }
 
 char const *

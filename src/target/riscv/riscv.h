@@ -17,13 +17,10 @@
 #define DIM(x) (sizeof (x) / sizeof (x)[0])
 
 /* The register cache is statically allocated. */
-#define RISCV_MAX_HARTS 32
-#define RISCV_MAX_REGISTERS 5000
-#define RISCV_MAX_TRIGGERS 32
-#define RISCV_MAX_HWBPS 16
-
-#define DEFAULT_COMMAND_TIMEOUT_SEC		2
-#define DEFAULT_RESET_TIMEOUT_SEC		30
+#define RISCV_MAX_HARTS		(32)
+#define RISCV_MAX_REGISTERS	(5000)
+#define RISCV_MAX_TRIGGERS	(32)
+#define RISCV_MAX_HWBPS		(16)
 
 /** Definitions shared by code supporting all RISC-V versions. */
 /**@{*/
@@ -131,12 +128,6 @@ enum riscv_halt_reason {
 	RISCV_HALT_ERROR
 };
 
-struct riscv_reg_info_s {
-	struct target *target;
-	unsigned custom_number;
-};
-typedef struct riscv_reg_info_s riscv_reg_info_t;
-
 struct HART_register_s {
 #if 0
 	uint64_t saved;
@@ -159,17 +150,6 @@ struct HART_s {
 
 	/* The number of entries in the debug buffer. */
 	int debug_buffer_size;
-};
-
-struct trigger {
-	uint64_t address;
-	uint32_t length;
-	uint64_t mask;
-	uint64_t value;
-	bool read;
-	bool write;
-	bool execute;
-	int unique_id;
 };
 
 struct riscv_info_t {
@@ -227,32 +207,11 @@ struct riscv_info_t {
 
 	bool triggers_enumerated;
 
-	/** Helper functions that target the various RISC-V debug spec implementations. */
-	int (__attribute__((warn_unused_result)) *get_register)(struct target *target, riscv_reg_t *value, int hid, int rid);
-	int (__attribute__((warn_unused_result)) *set_register)(struct target *, int hartid, int regid, uint64_t value);
-	int (__attribute__((warn_unused_result)) *select_current_hart)(struct target *);
-
-	/**
-	@todo check error code
-	*/
-	bool (*is_halted)(struct target *target);
-
-	int (__attribute__((warn_unused_result)) *halt_current_hart)(struct target *);
-	int (__attribute__((warn_unused_result)) *resume_current_hart)(struct target *target);
-	int (__attribute__((warn_unused_result)) *step_current_hart)(struct target *target);
-
-	/**
-	@todo check error code
-	*/
-	int (*on_halt)(struct target *target);
-
 	int (__attribute__((warn_unused_result)) *on_resume)(struct target *target);
 	/**
 	@todo check error code
 	*/
 	/**@{*/
-	int (*on_step)(struct target *target);
-	enum riscv_halt_reason (*halt_reason)(struct target *target);
 	int(*write_debug_buffer)(struct target *target, unsigned index, riscv_insn_t d);
 	riscv_insn_t (*read_debug_buffer)(struct target *target, unsigned index);
 	/**@}*/
@@ -267,19 +226,6 @@ struct riscv_info_t {
 	void (*fill_dmi_read_u64)(struct target *target, uint8_t *buf, int a);
 	void (*fill_dmi_nop_u64)(struct target *target, uint8_t *buf);
 	/**@}*/
-
-	int (__attribute__((warn_unused_result)) *authdata_read)(struct target *target, uint32_t *value);
-	int (__attribute__((warn_unused_result)) *authdata_write)(struct target *target, uint32_t value);
-
-	int (__attribute__((warn_unused_result)) *dmi_read)(struct target *target, uint32_t *value, uint32_t address);
-	int (__attribute__((warn_unused_result)) *dmi_write)(struct target *target, uint32_t address, uint32_t value);
-	int (__attribute__((warn_unused_result)) *test_sba_config_reg)(struct target *target,
-		target_addr_t legal_address,
-		uint32_t num_words,
-		target_addr_t illegal_address,
-		bool run_sbbusyerror_test);
-
-	int (__attribute__((warn_unused_result)) *test_compliance)(struct target *target);
 };
 
 /** Everything needs the RISC-V specific info structure, so here's a nice macro that provides that. */
