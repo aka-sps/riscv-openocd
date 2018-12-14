@@ -193,9 +193,6 @@ get_target_type(struct target *const target)
 	}
 
 	switch (info->dtm_version) {
-		case 0:
-			return &riscv_011_target;
-
 		case 1:
 			return &riscv_013_target;
 

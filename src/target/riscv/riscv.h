@@ -285,7 +285,6 @@ struct riscv_info_t {
 /**
 	@todo Move to separate version-related files
 */
-extern struct target_type const riscv_011_target;
 extern struct target_type const riscv_013_target;
 
 /**
