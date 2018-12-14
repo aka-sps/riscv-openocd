@@ -54,6 +54,17 @@ int riscv_update_threads(struct rtos *rtos)
 	return JIM_OK;
 }
 
+/** When using the RTOS to debug, this selects the hart that is currently being
+* debugged.  This doesn't propogate to the hardware. */
+/**@{*/
+static inline void
+riscv_set_all_rtos_harts(struct target *const target)
+{
+	struct riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	rvi->rtos_hartid = -1;
+}
+
 static int riscv_gdb_thread_packet(struct connection *connection, const char *packet, int packet_size)
 {
 	struct target *target = get_target_from_connection(connection);
@@ -250,13 +261,9 @@ static int riscv_gdb_v_packet(struct connection *connection, const char *packet,
 
 	if (strcmp(packet_stttrr, "vCont;c") == 0) {
 		target_call_event_callbacks(target, TARGET_EVENT_GDB_START);
-		target_call_event_callbacks(target, TARGET_EVENT_RESUME_START);
 		riscv_set_all_rtos_harts(target);
-		riscv_openocd_resume(target, 1, 0, 0, 0);
-		target->state = TARGET_RUNNING;
+		target_resume(target, 1, 0, 0, 0);
 		gdb_set_frontend_state_running(connection);
-		target_call_event_callbacks(target, TARGET_EVENT_RESUMED);
-		target_call_event_callbacks(target, TARGET_EVENT_RESUME_END);
 		return JIM_OK;
 	}
 
@@ -264,6 +271,22 @@ static int riscv_gdb_v_packet(struct connection *connection, const char *packet,
 		LOG_ERROR("Got unknown vCont-type packet");
 
 	return GDB_THREAD_PACKET_NOT_CONSUMED;
+}
+
+/** @returns TRUE if the target has the given register on the given hart.
+
+@warning Always return true
+*/
+static inline bool
+__attribute__((const))
+riscv_has_register(struct target *const target,
+	int const hartid,
+	int const regid)
+{
+	(void)(target);
+	(void)(hartid);
+	(void)(regid);
+	return true;
 }
 
 static int riscv_get_thread_reg_list(struct rtos *rtos, int64_t thread_id, char **hex_reg_list)

@@ -282,47 +282,6 @@ struct riscv_info_t {
 	int (__attribute__((warn_unused_result)) *test_compliance)(struct target *target);
 };
 
-/**
-	@todo Move to separate version-related files
-*/
-extern struct target_type const riscv_013_target;
-
-/**
-	@bug Different targets can use different options
-*/
-/**@{*/
-/**	Wall-clock timeout for a command/access.
-
-	Settable via RISC-V Target commands.
-*/
-extern int riscv_command_timeout_sec;
-
-/**	Wall-clock timeout after reset.
-
-	Settable via RISC-V Target commands.
-*/
-extern int riscv_reset_timeout_sec;
-
-extern bool riscv_prefer_sba;
-/**@}*/
-
-/** @name RISC-V TAP operations */
-/**@{*/
-void
-select_dmi(struct jtag_tap *const tap);
-
-int
-__attribute__((warn_unused_result))
-idcode_scan(struct jtag_tap *const tap,
-	uint32_t p_in_value[1]);
-
-int
-__attribute__((warn_unused_result))
-dtmcontrol_scan(struct jtag_tap *const tap,
-	uint32_t const out_value,
-	uint32_t *const p_in_value);
-/**@}*/
-
 /** Everything needs the RISC-V specific info structure, so here's a nice macro that provides that. */
 static inline struct riscv_info_t *
 __attribute__((warn_unused_result, pure))
@@ -332,84 +291,18 @@ riscv_info(struct target const *const target)
 	return target->arch_info;
 }
 
-/** OpenOCD Interface */
-/** @{*/
-int
-riscv_openocd_poll(struct target *target);
-
-int
-riscv_openocd_halt(struct target *target);
-
-int
-riscv_openocd_resume(struct target *target,
-	int current,
-	target_addr_t address,
-	int handle_breakpoints,
-	int debug_execution);
-
-int
-riscv_openocd_step(struct target *target,
-	int current,
-	target_addr_t address,
-	int handle_breakpoints);
-
-/**@}*/
-
 /** RISC-V Interface */
 /**@{*/
-
-/** Run control, possibly for multiple harts.  The _all_harts versions resume
- * all the enabled harts, which when running in RTOS mode is all the harts on
- * the system. */
- /**@{*/
-int
-riscv_halt_all_harts(struct target *target);
-
-int
-riscv_resume_all_harts(struct target *target);
-/**@}*/
 
 /** Steps the hart that's currently selected in the RTOS, or if there is no RTOS
 * then the only hart. */
 int
 riscv_step_rtos_hart(struct target *target);
 
-/**
-	@bug Target already associated with hart with hartid
+/**	Sets the current hart,
+	which is the hart that will actually be used when issuing debug commands.
 */
-static inline bool
-__attribute__((pure))
-riscv_supports_extension(struct target *const target,
-	int const hartid,
-	char const letter)
-{
-	unsigned num;
-
-	if (letter >= 'a' && letter <= 'z')
-		num = letter - 'a';
-	else if (letter >= 'A' && letter <= 'Z')
-		num = letter - 'A';
-	else
-		return false;
-
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS && num <= ('Z' - 'A'));
-	return rvi->harts[hartid].misa & (1 << num);
-}
-
-static inline bool
-__attribute__((pure))
-riscv_rtos_enabled(struct target const *const target)
-{
-	assert(target);
-	return !!target->rtos;
-}
-
-/** Sets the current hart, which is the hart that will actually be used when
- * issuing debug commands. */
- /**@{*/
-int riscv_set_current_hartid(struct target *target, int hartid);
-
+/**@{*/
 static inline int
 __attribute__((warn_unused_result, pure))
 riscv_current_hartid(struct target const *const target)
@@ -442,17 +335,6 @@ riscv_xlen(struct target const *const target)
 /** Support functions for the RISC-V 'RTOS', which provides multihart support
  * without requiring multiple targets.  */
 
-/** When using the RTOS to debug, this selects the hart that is currently being
- * debugged.  This doesn't propogate to the hardware. */
- /**@{*/
-static inline void
-riscv_set_all_rtos_harts(struct target *const target)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-	rvi->rtos_hartid = -1;
-}
-
 static inline void
 riscv_set_rtos_hartid(struct target *const target,
 	int const hartid)
@@ -472,30 +354,11 @@ int
 __attribute__((pure))
 riscv_count_harts(struct target const *target);
 
-/** @returns TRUE if the target has the given register on the given hart.
-
-    @warning Always return true
-*/
-static inline bool
-__attribute__((const))
-riscv_has_register(struct target *const target,
-	int const hartid,
-	int const regid)
-{
-	(void)(target);
-	(void)(hartid);
-	(void)(regid);
-	return true;
-}
-
 /* @returns the value of the given register on the given hart.  32-bit registers
  * are zero extended to 64 bits.  */
  /**@{*/
 int
 riscv_set_register(struct target *target, enum gdb_regno i, riscv_reg_t v);
-
-int
-riscv_set_register_on_hart(struct target *target, int hid, enum gdb_regno rid, uint64_t v);
 
 int
 riscv_get_register(struct target *target, riscv_reg_t *value, enum gdb_regno r);
@@ -504,21 +367,7 @@ int
 riscv_get_register_on_hart(struct target *target, riscv_reg_t *value, int hartid, enum gdb_regno regid);
 /**@}*/
 
-/** Checks the state of the current hart -- "is_halted" checks the actual
- * on-device register. */
-bool riscv_is_halted(struct target *target);
-
 enum riscv_halt_reason riscv_halt_reason(struct target *target, int hartid);
-
-/** Invalidates the register cache. */
-void riscv_invalidate_register_cache(struct target *target);
-
-/** @returns TRUE when a hart is enabled in this target. */
-bool riscv_hart_enabled(struct target *target, int hartid);
-
-int riscv_enumerate_triggers(struct target *target);
-
-int riscv_init_registers(struct target *target);
 
 void riscv_semihosting_init(struct target *target);
 int riscv_semihosting(struct target *target, int *p_error_code);

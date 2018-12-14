@@ -269,7 +269,27 @@ struct range_s {
 };
 typedef struct range_s range_t;
 
-static LIST_HEAD(dm_list);
+static int
+register_get(struct reg *const reg);
+static int
+register_set(struct reg *const reg,
+	uint8_t *const buf);
+
+struct csr_info {
+	unsigned number;
+	char const *name;
+};
+
+static struct csr_info csr_info[] = {
+#define DECLARE_CSR(name, number) { number, #name },
+#include "encoding.h"
+#undef DECLARE_CSR
+};
+
+static struct reg_arch_type const riscv_reg_arch_type = {
+	.get = register_get,
+	.set = register_set
+};
 
 static struct descr const description[] = {
 	{DMI_DMCONTROL, DMI_DMCONTROL_HALTREQ, "haltreq"},
@@ -320,10 +340,21 @@ static struct descr const description[] = {
 	{DMI_SBCS, DMI_SBCS_SBACCESS8, "sbaccess8"},
 };
 
-int riscv_command_timeout_sec = DEFAULT_COMMAND_TIMEOUT_SEC;
-int riscv_reset_timeout_sec = DEFAULT_RESET_TIMEOUT_SEC;
+static LIST_HEAD(dm_list);
 
-bool riscv_prefer_sba = false;
+/**	Wall-clock timeout for a command/access.
+
+Settable via RISC-V Target commands.
+*/
+static int riscv_command_timeout_sec = DEFAULT_COMMAND_TIMEOUT_SEC;
+
+/**	Wall-clock timeout after reset.
+
+Settable via RISC-V Target commands.
+*/
+static int riscv_reset_timeout_sec = DEFAULT_RESET_TIMEOUT_SEC;
+
+static bool riscv_prefer_sba = false;
 
 /** In addition to the ones in the standard spec, we'll also expose additional CSRs in this list.
 
@@ -481,6 +512,80 @@ dmi_scan(struct target *const target,
 	riscv_013_dump_field(&field);
 
 	return buf_get_u32(in_buffer, DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH);
+}
+
+static void
+select_instruction(struct jtag_tap *const tap,
+	uint8_t const instruction_buffer[1])
+{
+	assert(tap);
+	assert(0 < tap->ir_length && tap->ir_length <= UINT8_MAX);
+	typedef struct scan_field scan_field_t;
+	scan_field_t const field = {
+		.num_bits = tap->ir_length,
+		.out_value = instruction_buffer,
+	};
+
+	jtag_add_ir_scan(tap, &field, TAP_IDLE);
+}
+
+static void
+select_dmi(struct jtag_tap *const tap)
+{
+	static uint8_t const instruction_buffer[1] = {DTM_DMI};
+	select_instruction(tap, instruction_buffer);
+}
+
+static int
+__attribute__((warn_unused_result))
+uint32_instruction_scan(struct jtag_tap *const tap,
+	uint8_t const instruction,
+	char const *const instruction_name,
+	uint32_t const out_value,
+	uint32_t *const p_in_value)
+{
+	typedef struct scan_field scan_field_t;
+	uint8_t out_buffer[sizeof(uint32_t)] = {};
+	uint8_t in_buffer[sizeof(uint32_t)] = {};
+	scan_field_t const field = {
+		.num_bits = CHAR_BIT * sizeof(uint32_t),
+		.out_value = out_buffer,
+		.in_value = p_in_value ? in_buffer : NULL,
+	};
+
+	select_instruction(tap, &instruction);
+	buf_set_u32(out_buffer, 0, CHAR_BIT * sizeof(uint32_t), out_value);
+	jtag_add_dr_scan(tap, 1, &field, TAP_IDLE);
+
+	/** Always return to @c dmi.
+
+	@bug Non robust strategy
+	*/
+	select_dmi(tap);
+
+	int const error_code = jtag_execute_queue();
+
+	if (ERROR_OK != error_code) {
+		LOG_ERROR("%s: jtag IR/DR scan failed: %d",
+			jtag_tap_name(tap), error_code);
+	} else if (p_in_value) {
+		*p_in_value = buf_get_u32(field.in_value, 0, CHAR_BIT * sizeof(uint32_t));
+		LOG_DEBUG("%s: %s: 0x%" PRIx32 " -> 0x%" PRIx32,
+			jtag_tap_name(tap), instruction_name, out_value, *p_in_value);
+	} else {
+		LOG_DEBUG("%s: %s: 0x%" PRIx32,
+			jtag_tap_name(tap), instruction_name, out_value);
+	}
+
+	return error_code;
+}
+
+static int
+dtmcontrol_scan(struct jtag_tap *const tap,
+	uint32_t const out_value,
+	uint32_t *const p_in_value)
+{
+	return uint32_instruction_scan(tap, DTM_DTMCS, "DTMCONTROL", out_value, p_in_value);
 }
 
 static int
@@ -1363,6 +1468,38 @@ register_size(struct target *const target,
 		return riscv_xlen(target);
 }
 
+/**
+@bug Target already associated with hart with hartid
+*/
+static inline bool
+__attribute__((pure))
+riscv_supports_extension(struct target *const target,
+	int const hartid,
+	char const letter)
+{
+	unsigned num;
+
+	if (letter >= 'a' && letter <= 'z')
+		num = letter - 'a';
+	else if (letter >= 'A' && letter <= 'Z')
+		num = letter - 'A';
+	else
+		return false;
+
+	struct riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS && num <= ('Z' - 'A'));
+	return rvi->harts[hartid].misa & (1 << num);
+}
+
+/** Checks the state of the current hart -- "is_halted" checks the actual on-device register. */
+static bool
+riscv_is_halted(struct target *const target)
+{
+	struct riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && rvi->is_halted);
+	return rvi->is_halted(target);
+}
+
 /** Immediately write the new value to the requested register.
 
 This mechanism bypasses any caches.
@@ -1817,6 +1954,28 @@ riscv_013_authdata_read(struct target *const target,
 		dmi_read(target, value, DMI_AUTHDATA);
 }
 
+static inline bool
+__attribute__((pure))
+riscv_rtos_enabled(struct target const *const target)
+{
+	assert(target);
+	return !!target->rtos;
+}
+
+/** @returns TRUE when a hart is enabled in this target. */
+static bool
+riscv_hart_enabled(struct target *const target,
+	int hartid)
+{
+	/**
+	@todo FIXME: Add a hart mask to the RTOS.
+	*/
+	if (riscv_rtos_enabled(target))
+		return hartid < riscv_count_harts(target);
+
+	return hartid == target->coreid;
+}
+
 /** @return error code */
 static int
 riscv_013_assert_reset(struct target *const target)
@@ -1885,6 +2044,8 @@ riscv_013_assert_reset(struct target *const target)
 static int
 riscv_013_deassert_reset(struct target *const target)
 {
+	assert(target);
+	LOG_DEBUG("%s: RISCV DEASSERT RESET", target_name(target));
 	riscv_013_info_t *const info = get_info(target);
 	select_dmi(target->tap);
 
@@ -2004,6 +2165,62 @@ write_to_buf(uint8_t *const buffer,
 	default:
 		assert(false);
 	}
+}
+
+/** Invalidates the register cache. */
+static void
+riscv_invalidate_register_cache(struct target *const target)
+{
+	register_cache_invalidate(target->reg_cache);
+
+	for (size_t i = 0; i < target->reg_cache->num_regs; ++i) {
+		struct reg *reg = &target->reg_cache->reg_list[i];
+		assert(reg);
+		reg->valid = false;
+	}
+
+	struct riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	rvi->registers_initialized = true;
+}
+
+/**	Sets the current hart,
+which is the hart that will actually be used when issuing debug commands.
+
+@return error code
+*/
+static int
+riscv_set_current_hartid(struct target *const target,
+	int const hartid)
+{
+	struct riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+
+	if (!rvi->select_current_hart)
+		return ERROR_OK;
+
+	int const previous_hartid = riscv_current_hartid(target);
+	rvi->current_hartid = hartid;
+	assert(riscv_hart_enabled(target, hartid));
+	LOG_DEBUG("%s: setting hartid to %d, was %d", target_name(target), hartid, previous_hartid);
+
+	{
+		int const error_code = rvi->select_current_hart(target);
+
+		if (ERROR_OK != error_code)
+			return error_code;
+	}
+
+	/* This might get called during init, in which case we shouldn't be
+	* setting up the register cache. */
+	if (!target_was_examined(target))
+		/**
+		@todo ERROR_TARGET_NOT_EXAMINED
+		*/
+		return ERROR_OK;
+
+	riscv_invalidate_register_cache(target);
+	return ERROR_OK;
 }
 
 /** @return error code */
@@ -3521,6 +3738,123 @@ riscv_013_is_halted(struct target *const target)
 	return get_field(dmstatus, DMI_DMSTATUS_ALLHALTED);
 }
 
+/**	@return error code */
+static int
+riscv_set_register_on_hart(struct target *const target,
+	int const hartid,
+	enum gdb_regno const regid,
+	uint64_t const value)
+{
+	LOG_DEBUG("%s: [%d] %s <- %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), value);
+	struct riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && rvi->set_register);
+	return rvi->set_register(target, hartid, regid, value);
+}
+
+/**	@brief Count triggers, and initialize trigger_count for each hart.
+
+trigger_count is initialized even if this function fails to discover something.
+
+Disable any hardware triggers that have @c dmode set.
+We can't have set them ourselves.
+Maybe they're left over from some killed debug session.
+
+@return error code
+*/
+static int
+riscv_enumerate_triggers(struct target *const target)
+{
+	struct riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+
+	if (rvi->triggers_enumerated)
+		return ERROR_OK;
+
+	for (int hartid = 0; hartid < riscv_count_harts(target); ++hartid) {
+		if (!riscv_hart_enabled(target, hartid))
+			continue;
+
+		riscv_reg_t tselect;
+		{
+			int const error_code =
+				riscv_get_register_on_hart(target, &tselect, hartid, GDB_REGNO_TSELECT);
+
+			if (ERROR_OK != error_code)
+				return error_code;
+		}
+
+		for (unsigned t = 0; t < RISCV_MAX_TRIGGERS; ++t) {
+			rvi->harts[hartid].trigger_count = t;
+
+			riscv_set_register_on_hart(target, hartid, GDB_REGNO_TSELECT, t);
+			uint64_t tselect_rb;
+			{
+				int const error_code =
+					riscv_get_register_on_hart(target, &tselect_rb, hartid, GDB_REGNO_TSELECT);
+
+				if (ERROR_OK != error_code)
+					return error_code;
+			}
+
+			/* Mask off the top bit, which is used as @c tdrmode in old implementations. */
+			tselect_rb &= ~(1ULL << (riscv_xlen(target) - 1));
+
+			if (tselect_rb != t)
+				break;
+
+			uint64_t tdata1;
+			{
+				int const error_code =
+					riscv_get_register_on_hart(target, &tdata1, hartid, GDB_REGNO_TDATA1);
+
+				if (ERROR_OK != error_code)
+					return error_code;
+			}
+
+			int const type = get_field(tdata1, MCONTROL_TYPE(riscv_xlen(target)));
+
+			switch (type) {
+			case 1:
+				{
+					/* On these older cores we don't support software using triggers. */
+					int const error_code = riscv_set_register_on_hart(target, hartid, GDB_REGNO_TDATA1, 0);
+
+					if (ERROR_OK != error_code)
+						return error_code;
+				}
+				break;
+
+			case 2:
+				if (tdata1 & MCONTROL_DMODE(riscv_xlen(target))) {
+					int const error_code = riscv_set_register_on_hart(target, hartid, GDB_REGNO_TDATA1, 0);
+
+					if (ERROR_OK != error_code)
+						return error_code;
+				}
+				break;
+
+				/**
+				@bug no default case
+				*/
+			}
+		}
+
+		{
+			int const error_code =
+				riscv_set_register_on_hart(target, hartid, GDB_REGNO_TSELECT, tselect);
+
+			if (ERROR_OK != error_code)
+				return error_code;
+		}
+
+		LOG_INFO("%s: [%d] Found %d triggers",
+			target_name(target), hartid, rvi->harts[hartid].trigger_count);
+	}
+
+	rvi->triggers_enumerated = true;
+	return ERROR_OK;
+}
+
 /**
 @bug nonhandled errors
 */
@@ -4333,6 +4667,106 @@ riscv_013_resume_current_hart(struct target *const target)
 	return riscv_013_step_or_resume_current_hart(target, false);
 }
 
+static int
+riscv_halt_one_hart(struct target *const target, int const hartid)
+{
+	LOG_DEBUG("%s: halting hart %d", target_name(target), hartid);
+
+	{
+		int const error_code = riscv_set_current_hartid(target, hartid);
+
+		if (ERROR_OK != error_code)
+			return error_code;
+	}
+
+	if (riscv_is_halted(target)) {
+		LOG_DEBUG("%s:  hart %d requested halt, but was already halted",
+			target_name(target), hartid);
+		return ERROR_OK;
+	}
+
+	struct riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && rvi->halt_current_hart);
+	return rvi->halt_current_hart(target);
+}
+
+/**	Run control, possibly for multiple harts.
+
+The _all_harts versions resume all the enabled harts,
+which when running in RTOS mode is all the harts on the system.
+
+@return error code
+*/
+static int
+riscv_halt_all_harts(struct target *const target)
+{
+	for (int i = 0; i < riscv_count_harts(target); ++i) {
+		if (!riscv_hart_enabled(target, i))
+			continue;
+
+		riscv_halt_one_hart(target, i);
+	}
+
+	riscv_invalidate_register_cache(target);
+
+	return ERROR_OK;
+}
+
+/** @return error code*/
+static int
+riscv_resume_one_hart(struct target *const target, int const hartid)
+{
+	LOG_DEBUG("%s: resuming hart %d", target_name(target), hartid);
+
+	{
+		int const error_code = riscv_set_current_hartid(target, hartid);
+
+		if (ERROR_OK != error_code)
+			return error_code;
+	}
+
+	if (!riscv_is_halted(target)) {
+		LOG_DEBUG("%s:  hart %d requested resume, but was already resumed", target_name(target), hartid);
+		return ERROR_OK;
+	}
+
+	struct riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && rvi->on_resume);
+	{
+		int const error_code = rvi->on_resume(target);
+
+		if (ERROR_OK != error_code)
+			return error_code;
+	}
+	assert(rvi->resume_current_hart);
+	return rvi->resume_current_hart(target);
+}
+
+/**	Run control, possibly for multiple harts.
+
+The _all_harts versions resume all the enabled harts,
+which when running in RTOS mode is all the harts on the system.
+
+@return error code
+*/
+static int
+riscv_resume_all_harts(struct target *const target)
+{
+	int const number_of_harts = riscv_count_harts(target);
+	int error_code = ERROR_OK;
+
+	for (int i = 0; i < number_of_harts; ++i)
+		if (riscv_hart_enabled(target, i)) {
+			int const error_code_1 = riscv_resume_one_hart(target, i);
+
+			if (ERROR_OK == error_code && ERROR_OK != error_code_1)
+				error_code = error_code_1;
+		}
+
+	riscv_invalidate_register_cache(target);
+	return error_code;
+}
+
 /** @return error code */
 static int
 riscv_013_test_compliance(struct target *const target)
@@ -4801,6 +5235,620 @@ riscv_013_arch_state(struct target *const target)
 	return ERROR_OK;
 }
 
+/** @return signed value for ordering */
+static int
+cmp_csr_info(void const *p1, void const *p2)
+{
+	struct csr_info const *const pp1 = p1;
+	struct csr_info const *const pp2 = p2;
+	return
+		(int)(pp1->number) -
+		(int)(pp2->number);
+}
+
+/** @return error code*/
+static int
+riscv_init_registers(struct target *const target)
+{
+	assert(target);
+	if (target->reg_cache) {
+		if (target->reg_cache->reg_list)
+			free(target->reg_cache->reg_list);
+
+		free(target->reg_cache);
+	}
+
+	target->reg_cache = calloc(1, sizeof *target->reg_cache);
+	assert(target->reg_cache);
+	target->reg_cache->name = "RISC-V Registers";
+	target->reg_cache->num_regs = GDB_REGNO_COUNT;
+
+	if (expose_custom) {
+		for (unsigned i = 0; expose_custom[i].low <= expose_custom[i].high; ++i) {
+			for (
+				unsigned number = expose_custom[i].low;
+				number <= expose_custom[i].high;
+				++number
+				)
+				++target->reg_cache->num_regs;
+		}
+	}
+
+	LOG_DEBUG("%s: create register cache for %d registers",
+		target_name(target),
+		target->reg_cache->num_regs);
+
+	target->reg_cache->reg_list =
+		calloc(target->reg_cache->num_regs, sizeof(struct reg));
+	assert(target->reg_cache->reg_list);
+
+	static unsigned const max_reg_name_len = 12;
+	struct riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+
+	if (rvi->reg_names)
+		free(rvi->reg_names);
+
+	rvi->reg_names = calloc(target->reg_cache->num_regs, max_reg_name_len);
+	assert(rvi->reg_names);
+
+	typedef struct reg_feature reg_feature_t;
+	static reg_feature_t const feature_cpu = {
+		.name = "org.gnu.gdb.riscv.cpu"
+	};
+
+	static reg_feature_t const feature_fpu = {
+		.name = "org.gnu.gdb.riscv.fpu"
+	};
+
+	static reg_feature_t const feature_csr = {
+		.name = "org.gnu.gdb.riscv.csr"
+	};
+
+	static reg_feature_t const feature_virtual = {
+		.name = "org.gnu.gdb.riscv.virtual"
+	};
+
+	static reg_feature_t const feature_custom = {
+		.name = "org.gnu.gdb.riscv.custom"
+	};
+
+	typedef struct reg_data_type reg_data_type_t;
+	static reg_data_type_t const type_ieee_single = {
+		.type = REG_TYPE_IEEE_SINGLE,
+		.id = "ieee_single"
+	};
+
+	static reg_data_type_t const type_ieee_double = {
+		.type = REG_TYPE_IEEE_DOUBLE,
+		.id = "ieee_double"
+	};
+
+	/* encoding.h does not contain the registers in sorted order. */
+	qsort(csr_info, DIM(csr_info), sizeof *csr_info, cmp_csr_info);
+
+	unsigned custom_range_index = 0;
+	int custom_within_range = 0;
+
+	riscv_reg_info_t *const shared_reg_info = calloc(1, sizeof(riscv_reg_info_t));
+	assert(shared_reg_info);
+	shared_reg_info->target = target;
+
+	char *reg_name = rvi->reg_names;
+
+	/*
+	When gdb requests register N, gdb_get_register_packet() assumes
+	that this is register at index N in reg_list.
+	So if there are certain registers that don't exist,
+	we need to leave holes in the list
+	(or renumber, but it would be nice not to have yet another
+	set of numbers to translate between).
+	*/
+	for (uint32_t number = 0; number < target->reg_cache->num_regs; ++number) {
+		assert(target && target->reg_cache && target->reg_cache->reg_list && number < target->reg_cache->num_regs);
+		struct reg *const p_reg = &target->reg_cache->reg_list[number];
+		p_reg->dirty = false;
+		p_reg->valid = false;
+		p_reg->exist = true;
+		p_reg->type = &riscv_reg_arch_type;
+		p_reg->arch_info = shared_reg_info;
+		p_reg->number = number;
+		p_reg->size = riscv_xlen(target);
+
+		/* p_reg->size is set in riscv_invalidate_register_cache, maybe because the
+		* target is in theory allowed to change XLEN on us. But I expect a lot
+		* of other things to break in that case as well. */
+		if (number <= GDB_REGNO_XPR31) {
+			p_reg->caller_save = true;
+
+			switch (number) {
+			case GDB_REGNO_ZERO:
+				p_reg->name = "zero";
+				break;
+
+			case GDB_REGNO_RA:
+				p_reg->name = "ra";
+				break;
+
+			case GDB_REGNO_SP:
+				p_reg->name = "sp";
+				break;
+
+			case GDB_REGNO_GP:
+				p_reg->name = "gp";
+				break;
+
+			case GDB_REGNO_TP:
+				p_reg->name = "tp";
+				break;
+
+			case GDB_REGNO_T0:
+				p_reg->name = "t0";
+				break;
+
+			case GDB_REGNO_T1:
+				p_reg->name = "t1";
+				break;
+
+			case GDB_REGNO_T2:
+				p_reg->name = "t2";
+				break;
+
+			case GDB_REGNO_FP:
+				p_reg->name = "fp";
+				break;
+
+			case GDB_REGNO_S1:
+				p_reg->name = "s1";
+				break;
+
+			case GDB_REGNO_A0:
+				p_reg->name = "a0";
+				break;
+
+			case GDB_REGNO_A1:
+				p_reg->name = "a1";
+				break;
+
+			case GDB_REGNO_A2:
+				p_reg->name = "a2";
+				break;
+
+			case GDB_REGNO_A3:
+				p_reg->name = "a3";
+				break;
+
+			case GDB_REGNO_A4:
+				p_reg->name = "a4";
+				break;
+
+			case GDB_REGNO_A5:
+				p_reg->name = "a5";
+				break;
+
+			case GDB_REGNO_A6:
+				p_reg->name = "a6";
+				break;
+
+			case GDB_REGNO_A7:
+				p_reg->name = "a7";
+				break;
+
+			case GDB_REGNO_S2:
+				p_reg->name = "s2";
+				break;
+
+			case GDB_REGNO_S3:
+				p_reg->name = "s3";
+				break;
+
+			case GDB_REGNO_S4:
+				p_reg->name = "s4";
+				break;
+
+			case GDB_REGNO_S5:
+				p_reg->name = "s5";
+				break;
+
+			case GDB_REGNO_S6:
+				p_reg->name = "s6";
+				break;
+
+			case GDB_REGNO_S7:
+				p_reg->name = "s7";
+				break;
+
+			case GDB_REGNO_S8:
+				p_reg->name = "s8";
+				break;
+
+			case GDB_REGNO_S9:
+				p_reg->name = "s9";
+				break;
+
+			case GDB_REGNO_S10:
+				p_reg->name = "s10";
+				break;
+
+			case GDB_REGNO_S11:
+				p_reg->name = "s11";
+				break;
+
+			case GDB_REGNO_T3:
+				p_reg->name = "t3";
+				break;
+
+			case GDB_REGNO_T4:
+				p_reg->name = "t4";
+				break;
+
+			case GDB_REGNO_T5:
+				p_reg->name = "t5";
+				break;
+
+			case GDB_REGNO_T6:
+				p_reg->name = "t6";
+				break;
+			}
+
+			p_reg->group = "general";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_cpu);
+		} else if (number == GDB_REGNO_PC) {
+			p_reg->caller_save = true;
+			reg_name[max_reg_name_len - 1] = '\0';
+			snprintf(reg_name, max_reg_name_len - 1, "pc");
+			p_reg->group = "general";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_cpu);
+		} else if (GDB_REGNO_FPR0 <= number && number <= GDB_REGNO_FPR31) {
+			p_reg->caller_save = true;
+
+			if (riscv_supports_extension(target, riscv_current_hartid(target), 'D')) {
+				/**
+				@todo This should probably be const.
+				*/
+				p_reg->reg_data_type = (reg_data_type_t *)(&type_ieee_double);
+				p_reg->size = 64;
+			} else if (riscv_supports_extension(target, riscv_current_hartid(target), 'F')) {
+				/**
+				@todo This should probably be const.
+				*/
+				p_reg->reg_data_type = (reg_data_type_t *)(&type_ieee_single);
+				p_reg->size = 32;
+			} else {
+				p_reg->exist = false;
+			}
+
+			switch (number) {
+			case GDB_REGNO_FT0:
+				p_reg->name = "ft0";
+				break;
+
+			case GDB_REGNO_FT1:
+				p_reg->name = "ft1";
+				break;
+
+			case GDB_REGNO_FT2:
+				p_reg->name = "ft2";
+				break;
+
+			case GDB_REGNO_FT3:
+				p_reg->name = "ft3";
+				break;
+
+			case GDB_REGNO_FT4:
+				p_reg->name = "ft4";
+				break;
+
+			case GDB_REGNO_FT5:
+				p_reg->name = "ft5";
+				break;
+
+			case GDB_REGNO_FT6:
+				p_reg->name = "ft6";
+				break;
+
+			case GDB_REGNO_FT7:
+				p_reg->name = "ft7";
+				break;
+
+			case GDB_REGNO_FS0:
+				p_reg->name = "fs0";
+				break;
+
+			case GDB_REGNO_FS1:
+				p_reg->name = "fs1";
+				break;
+
+			case GDB_REGNO_FA0:
+				p_reg->name = "fa0";
+				break;
+
+			case GDB_REGNO_FA1:
+				p_reg->name = "fa1";
+				break;
+
+			case GDB_REGNO_FA2:
+				p_reg->name = "fa2";
+				break;
+
+			case GDB_REGNO_FA3:
+				p_reg->name = "fa3";
+				break;
+
+			case GDB_REGNO_FA4:
+				p_reg->name = "fa4";
+				break;
+
+			case GDB_REGNO_FA5:
+				p_reg->name = "fa5";
+				break;
+
+			case GDB_REGNO_FA6:
+				p_reg->name = "fa6";
+				break;
+
+			case GDB_REGNO_FA7:
+				p_reg->name = "fa7";
+				break;
+
+			case GDB_REGNO_FS2:
+				p_reg->name = "fs2";
+				break;
+
+			case GDB_REGNO_FS3:
+				p_reg->name = "fs3";
+				break;
+
+			case GDB_REGNO_FS4:
+				p_reg->name = "fs4";
+				break;
+
+			case GDB_REGNO_FS5:
+				p_reg->name = "fs5";
+				break;
+
+			case GDB_REGNO_FS6:
+				p_reg->name = "fs6";
+				break;
+
+			case GDB_REGNO_FS7:
+				p_reg->name = "fs7";
+				break;
+
+			case GDB_REGNO_FS8:
+				p_reg->name = "fs8";
+				break;
+
+			case GDB_REGNO_FS9:
+				p_reg->name = "fs9";
+				break;
+
+			case GDB_REGNO_FS10:
+				p_reg->name = "fs10";
+				break;
+
+			case GDB_REGNO_FS11:
+				p_reg->name = "fs11";
+				break;
+
+			case GDB_REGNO_FT8:
+				p_reg->name = "ft8";
+				break;
+
+			case GDB_REGNO_FT9:
+				p_reg->name = "ft9";
+				break;
+
+			case GDB_REGNO_FT10:
+				p_reg->name = "ft10";
+				break;
+
+			case GDB_REGNO_FT11:
+				p_reg->name = "ft11";
+				break;
+				/**
+				@bug no default case
+				*/
+			}
+
+			p_reg->group = "float";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_fpu);
+		} else if (GDB_REGNO_CSR0 <= number && number <= GDB_REGNO_CSR4095) {
+			p_reg->group = "csr";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_csr);
+			unsigned const csr_number = number - GDB_REGNO_CSR0;
+
+			unsigned csr_info_index = 0;
+			while (csr_info[csr_info_index].number < csr_number && csr_info_index < DIM(csr_info) - 1)
+				++csr_info_index;
+
+			if (csr_info[csr_info_index].number == csr_number) {
+				p_reg->name = csr_info[csr_info_index].name;
+			} else {
+				reg_name[max_reg_name_len - 1] = '\0';
+				snprintf(reg_name, max_reg_name_len - 1, "csr%d", csr_number);
+				/* Assume unnamed registers don't exist, unless we have some
+				* configuration that tells us otherwise. That's important
+				* because eg. Eclipse crashes if a target has too many
+				* registers, and apparently has no way of only showing a
+				* subset of registers in any case. */
+				p_reg->exist = false;
+			}
+
+			switch (csr_number) {
+			case CSR_FFLAGS:
+			case CSR_FRM:
+			case CSR_FCSR:
+				p_reg->exist =
+					riscv_supports_extension(target, riscv_current_hartid(target), 'F');
+				p_reg->group = "float";
+				/**
+				@todo This should probably be const.
+				*/
+				p_reg->feature = (reg_feature_t *)&feature_fpu;
+				break;
+
+			case CSR_SSTATUS:
+			case CSR_STVEC:
+			case CSR_SIP:
+			case CSR_SIE:
+			case CSR_SCOUNTEREN:
+			case CSR_SSCRATCH:
+			case CSR_SEPC:
+			case CSR_SCAUSE:
+			case CSR_STVAL:
+			case CSR_SATP:
+				p_reg->exist = riscv_supports_extension(target,
+					riscv_current_hartid(target), 'S');
+				break;
+
+			case CSR_MEDELEG:
+			case CSR_MIDELEG:
+				/* "In systems with only M-mode, or with both M-mode and
+				* U-mode but without U-mode trap support, the medeleg and
+				* mideleg registers should not exist." */
+				p_reg->exist = riscv_supports_extension(target, riscv_current_hartid(target), 'S') ||
+					riscv_supports_extension(target, riscv_current_hartid(target), 'N');
+				break;
+
+			case CSR_CYCLEH:
+			case CSR_TIMEH:
+			case CSR_INSTRETH:
+			case CSR_HPMCOUNTER3H:
+			case CSR_HPMCOUNTER4H:
+			case CSR_HPMCOUNTER5H:
+			case CSR_HPMCOUNTER6H:
+			case CSR_HPMCOUNTER7H:
+			case CSR_HPMCOUNTER8H:
+			case CSR_HPMCOUNTER9H:
+			case CSR_HPMCOUNTER10H:
+			case CSR_HPMCOUNTER11H:
+			case CSR_HPMCOUNTER12H:
+			case CSR_HPMCOUNTER13H:
+			case CSR_HPMCOUNTER14H:
+			case CSR_HPMCOUNTER15H:
+			case CSR_HPMCOUNTER16H:
+			case CSR_HPMCOUNTER17H:
+			case CSR_HPMCOUNTER18H:
+			case CSR_HPMCOUNTER19H:
+			case CSR_HPMCOUNTER20H:
+			case CSR_HPMCOUNTER21H:
+			case CSR_HPMCOUNTER22H:
+			case CSR_HPMCOUNTER23H:
+			case CSR_HPMCOUNTER24H:
+			case CSR_HPMCOUNTER25H:
+			case CSR_HPMCOUNTER26H:
+			case CSR_HPMCOUNTER27H:
+			case CSR_HPMCOUNTER28H:
+			case CSR_HPMCOUNTER29H:
+			case CSR_HPMCOUNTER30H:
+			case CSR_HPMCOUNTER31H:
+			case CSR_MCYCLEH:
+			case CSR_MINSTRETH:
+			case CSR_MHPMCOUNTER3H:
+			case CSR_MHPMCOUNTER4H:
+			case CSR_MHPMCOUNTER5H:
+			case CSR_MHPMCOUNTER6H:
+			case CSR_MHPMCOUNTER7H:
+			case CSR_MHPMCOUNTER8H:
+			case CSR_MHPMCOUNTER9H:
+			case CSR_MHPMCOUNTER10H:
+			case CSR_MHPMCOUNTER11H:
+			case CSR_MHPMCOUNTER12H:
+			case CSR_MHPMCOUNTER13H:
+			case CSR_MHPMCOUNTER14H:
+			case CSR_MHPMCOUNTER15H:
+			case CSR_MHPMCOUNTER16H:
+			case CSR_MHPMCOUNTER17H:
+			case CSR_MHPMCOUNTER18H:
+			case CSR_MHPMCOUNTER19H:
+			case CSR_MHPMCOUNTER20H:
+			case CSR_MHPMCOUNTER21H:
+			case CSR_MHPMCOUNTER22H:
+			case CSR_MHPMCOUNTER23H:
+			case CSR_MHPMCOUNTER24H:
+			case CSR_MHPMCOUNTER25H:
+			case CSR_MHPMCOUNTER26H:
+			case CSR_MHPMCOUNTER27H:
+			case CSR_MHPMCOUNTER28H:
+			case CSR_MHPMCOUNTER29H:
+			case CSR_MHPMCOUNTER30H:
+			case CSR_MHPMCOUNTER31H:
+				p_reg->exist = riscv_xlen(target) == 32;
+				break;
+			}
+
+			if (!p_reg->exist && expose_csr) {
+				for (unsigned i = 0; expose_csr[i].low <= expose_csr[i].high; ++i) {
+					if (csr_number >= expose_csr[i].low && csr_number <= expose_csr[i].high) {
+						LOG_INFO("%s: Exposing additional CSR %d", target_name(target), csr_number);
+						p_reg->exist = true;
+						break;
+					}
+				}
+			}
+
+		} else if (number == GDB_REGNO_PRIV) {
+			reg_name[max_reg_name_len - 1] = '\0';
+			snprintf(reg_name, max_reg_name_len - 1, "priv");
+			p_reg->group = "general";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_virtual);
+			p_reg->size = 8;
+
+		} else {
+			/* Custom registers. */
+			assert(expose_custom);
+
+			range_t *const range = &expose_custom[custom_range_index];
+			assert(range->low <= range->high);
+			unsigned const custom_number = range->low + custom_within_range;
+
+			p_reg->group = "custom";
+			/**
+			@todo This should probably be const.
+			*/
+			p_reg->feature = (reg_feature_t *)(&feature_custom);
+			p_reg->arch_info = calloc(1, sizeof(riscv_reg_info_t));
+			assert(p_reg->arch_info);
+			((riscv_reg_info_t *)(p_reg->arch_info))->target = target;
+			((riscv_reg_info_t *)(p_reg->arch_info))->custom_number = custom_number;
+			reg_name[max_reg_name_len - 1] = '\0';
+			snprintf(reg_name, max_reg_name_len - 1, "custom%d", custom_number);
+
+			++custom_within_range;
+
+			if (custom_within_range > range->high - range->low) {
+				custom_within_range = 0;
+				++custom_range_index;
+			}
+		}
+
+		if (*reg_name)
+			p_reg->name = reg_name;
+
+		reg_name += strlen(reg_name) + 1;
+		assert(reg_name < rvi->reg_names + target->reg_cache->num_regs * max_reg_name_len);
+		p_reg->value = &rvi->reg_cache_values[number];
+	}
+
+	return ERROR_OK;
+}
+
 static int
 riscv_013_examine(struct target *const target)
 {
@@ -5208,135 +6256,6 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 	return ERROR_OK;
 }
 
-struct target_type const riscv_013_target = {
-	.name = "riscv",
-
-	.init_target = riscv_013_init_target,
-	.deinit_target = riscv_013_deinit_target,
-	.examine = riscv_013_examine,
-
-	.poll = &riscv_openocd_poll,
-	.halt = &riscv_openocd_halt,
-	.resume = &riscv_openocd_resume,
-	.step = &riscv_openocd_step,
-
-	.assert_reset = riscv_013_assert_reset,
-	.deassert_reset = riscv_013_deassert_reset,
-
-	.read_memory = riscv_013_read_memory,
-	.write_memory = riscv_013_write_memory,
-
-	.arch_state = riscv_013_arch_state,
-};
-
-static void
-select_instruction(struct jtag_tap *const tap,
-	uint8_t const instruction_buffer[1])
-{
-	assert(tap);
-	assert(0 < tap->ir_length && tap->ir_length <= UINT8_MAX);
-	typedef struct scan_field scan_field_t;
-	scan_field_t const field = {
-		.num_bits = tap->ir_length,
-		.out_value = instruction_buffer,
-	};
-
-	jtag_add_ir_scan(tap, &field, TAP_IDLE);
-}
-
-void
-select_dmi(struct jtag_tap *const tap)
-{
-	static uint8_t const instruction_buffer[1] = {DTM_DMI};
-	select_instruction(tap, instruction_buffer);
-}
-
-static int
-__attribute__((warn_unused_result))
-uint32_instruction_scan(struct jtag_tap *const tap,
-	uint8_t const instruction,
-	char const *const instruction_name,
-	uint32_t const out_value,
-	uint32_t *const p_in_value)
-{
-	typedef struct scan_field scan_field_t;
-	uint8_t out_buffer[sizeof(uint32_t)] = {};
-	uint8_t in_buffer[sizeof(uint32_t)] = {};
-	scan_field_t const field = {
-		.num_bits = CHAR_BIT * sizeof(uint32_t),
-		.out_value = out_buffer,
-		.in_value = p_in_value ? in_buffer : NULL,
-	};
-
-	select_instruction(tap, &instruction);
-	buf_set_u32(out_buffer, 0, CHAR_BIT * sizeof(uint32_t), out_value);
-	jtag_add_dr_scan(tap, 1, &field, TAP_IDLE);
-
-	/** Always return to @c dmi.
-
-		@bug Non robust strategy
-	*/
-	select_dmi(tap);
-
-	int const error_code = jtag_execute_queue();
-
-	if (ERROR_OK != error_code) {
-		LOG_ERROR("%s: jtag IR/DR scan failed: %d",
-			jtag_tap_name(tap), error_code);
-	} else if (p_in_value) {
-		*p_in_value = buf_get_u32(field.in_value, 0, CHAR_BIT * sizeof(uint32_t));
-		LOG_DEBUG("%s: %s: 0x%" PRIx32 " -> 0x%" PRIx32,
-			jtag_tap_name(tap), instruction_name, out_value, *p_in_value);
-	} else {
-		LOG_DEBUG("%s: %s: 0x%" PRIx32,
-			jtag_tap_name(tap), instruction_name, out_value);
-	}
-
-	return error_code;
-}
-
-int
-idcode_scan(struct jtag_tap *const tap,
-	uint32_t p_in_value[1])
-{
-	assert(p_in_value);
-	return uint32_instruction_scan(tap, DTM_IDCODE, "IDCODE", 0, p_in_value);
-}
-
-int
-dtmcontrol_scan(struct jtag_tap *const tap,
-	uint32_t const out_value,
-	uint32_t *const p_in_value)
-{
-	return uint32_instruction_scan(tap, DTM_DTMCS, "DTMCONTROL", out_value, p_in_value);
-}
-
-/**
-
-@todo Replace target->type by examine
-*/
-static struct target_type const *
-__attribute__((warn_unused_result, pure))
-get_target_type(struct target *const target)
-{
-	assert(target);
-	struct riscv_info_t const *const info = target->arch_info;
-
-	if (!info) {
-		LOG_ERROR("%s: Target has not been initialized", target_name(target));
-		return NULL;
-	}
-
-	switch (info->dtm_version) {
-		case 1:
-			return &riscv_013_target;
-
-		default:
-			LOG_ERROR("%s: Unsupported DTM version: %d", target_name(target), info->dtm_version);
-			return NULL;
-	}
-}
-
 /** Create the shared RISC-V structure. 
 	@see struct riscv_info_t
 */
@@ -5399,14 +6318,10 @@ static void
 riscv_deinit_target(struct target *const target)
 {
 	LOG_DEBUG("%s: riscv_deinit_target()", target_name(target));
-	struct target_type const *const tt = get_target_type(target);
-
-	if (tt) {
-		tt->deinit_target(target);
-		struct riscv_info_t *const info = target->arch_info;
-		free(info->reg_names);
-		free(info);
-	}
+	riscv_013_deinit_target(target);
+	struct riscv_info_t *const info = target->arch_info;
+	free(info->reg_names);
+	free(info);
 
 	/* Free the shared structure use for most registers. */
 	assert(target->reg_cache->reg_list && 0 < target->reg_cache->num_regs);
@@ -5419,15 +6334,6 @@ riscv_deinit_target(struct target *const target)
 	free(target->reg_cache->reg_list);
 	free(target->reg_cache);
 	target->arch_info = NULL;
-}
-
-/** @return error code */
-static int
-oldriscv_halt(struct target *const target)
-{
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt && tt->halt);
-	return tt->halt(target);
 }
 
 static void
@@ -6066,37 +6972,6 @@ riscv_hit_watchpoint(struct target *const target,
 
 /** @return error code */
 static int
-oldriscv_step(struct target *const target,
-	int const current,
-	uint32_t const address,
-	int const handle_breakpoints)
-{
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt && tt->step);
-	return tt->step(target, current, address, handle_breakpoints);
-}
-
-/** @return error code */
-static int
-old_or_new_riscv_step(struct target *const target,
-	int const current,
-	target_addr_t const address,
-	int const handle_breakpoints)
-{
-	LOG_DEBUG("%s: handle_breakpoints=%d",
-		target_name(target), handle_breakpoints);
-
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (!rvi->is_halted)
-		return oldriscv_step(target, current, address, handle_breakpoints);
-	else
-		return riscv_openocd_step(target, current, address, handle_breakpoints);
-}
-
-/** @return error code */
-static int
 riscv_examine(struct target *const target)
 {
 	assert(target);
@@ -6124,107 +6999,14 @@ riscv_examine(struct target *const target)
 	info->dtm_version = get_field(dtmcontrol, DTMCONTROL_VERSION);
 	LOG_DEBUG("%s:  version=0x%x", target_name(target), info->dtm_version);
 
-	struct target_type const *const tt = get_target_type(target);
-
-	if (!tt)
-		return ERROR_TARGET_INVALID;
-
 	{
-		int const error_code = tt->init_target(info->cmd_ctx, target);
+		int const error_code = riscv_013_init_target(info->cmd_ctx, target);
 
 		if (ERROR_OK != error_code)
 			return error_code;
 	}
 
-	assert(tt->examine);
-	return tt->examine(target);
-}
-
-/** @return error code */
-static int
-oldriscv_poll(struct target *const target)
-{
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt && tt->poll);
-	return tt->poll(target);
-}
-
-/**
-@bug dynamic dispatch
-@return error code
-*/
-static int
-old_or_new_riscv_poll(struct target *const target)
-{
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-	return rvi->is_halted ? riscv_openocd_poll(target) : oldriscv_poll(target);
-}
-
-/**
-@return error code
-@bug dynamic dispatch
-*/
-static int
-old_or_new_riscv_halt(struct target *const target)
-{
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-	return rvi->is_halted ? riscv_openocd_halt(target) : oldriscv_halt(target);
-}
-
-/** @return error code */
-static int
-riscv_assert_reset(struct target *const target)
-{
-	struct target_type const *const tt = get_target_type(target);
-	return tt->assert_reset(target);
-}
-
-/** @return error code */
-static int
-riscv_deassert_reset(struct target *const target)
-{
-	assert(target);
-	LOG_DEBUG("%s: RISCV DEASSERT RESET", target_name(target));
-	struct target_type const *const tt = get_target_type(target);
-	return tt->deassert_reset(target);
-}
-
-/** @return error code */
-static int
-oldriscv_resume(struct target *const target,
-	int const current,
-	uint32_t const address,
-	int const handle_breakpoints,
-	int const debug_execution)
-{
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt && tt->resume);
-	return
-		tt->resume(target, current, address, handle_breakpoints, debug_execution);
-}
-
-/** @return error code */
-static int
-old_or_new_riscv_resume(struct target *const target,
-	int const current,
-	target_addr_t const address,
-	int const handle_breakpoints,
-	int debug_execution)
-{
-	assert(target);
-	LOG_DEBUG("%s: handle_breakpoints=%d",
-			target_name(target),
-			handle_breakpoints);
-
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-
-	return
-		rvi->is_halted ?
-		riscv_openocd_resume(target, current, address, handle_breakpoints, debug_execution) :
-		oldriscv_resume(target, current, address, handle_breakpoints, debug_execution);
+	return riscv_013_examine(target);
 }
 
 /** @return error code */
@@ -6280,9 +7062,7 @@ riscv_read_memory(struct target *const target,
 			return error_code;
 	}
 
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt);
-	return tt->read_memory(target, address, size, count, buffer);
+	return riscv_013_read_memory(target, address, size, count, buffer);
 }
 
 static int
@@ -6310,9 +7090,7 @@ riscv_write_memory(struct target *const target,
 			return error_code;
 	}
 
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt);
-	return tt->write_memory(target, address, size, count, buffer);
+	return riscv_013_write_memory(target, address, size, count, buffer);
 }
 
 /** @return error code */
@@ -6376,252 +7154,6 @@ riscv_get_gdb_reg_list(struct target *const target,
 	return ERROR_OK;
 }
 
-/** @return error code */
-static int
-riscv_arch_state(struct target *const target)
-{
-	struct target_type const *const tt = get_target_type(target);
-	assert(tt);
-	return tt->arch_state(target);
-}
-
-#if 0
-/** Algorithm must end with a software breakpoint instruction. */
-static int
-riscv_run_algorithm(struct target *const target,
-	int const num_mem_params,
-	struct mem_param *const mem_params,
-	int const num_reg_params,
-	struct reg_param *const reg_params,
-	target_addr_t const entry_point,
-	target_addr_t const exit_point,
-	int const timeout_ms,
-	void *const arch_info)
-{
-	assert(target);
-	struct riscv_info_t *const info = target->arch_info;
-
-	if (0 < num_mem_params) {
-		LOG_ERROR("%s: Memory parameters are not supported for RISC-V algorithms.",
-				target_name(target));
-		return ERROR_COMMAND_ARGUMENT_INVALID;
-	}
-
-	if (TARGET_HALTED != target->state) {
-		LOG_WARNING("%s: target not halted", target_name(target));
-		return ERROR_TARGET_NOT_HALTED;
-	}
-
-	/* Save registers */
-	struct reg *const reg_pc =
-		register_get_by_name(target->reg_cache, "pc", 1);
-
-	if (!reg_pc)
-		return ERROR_TARGET_INVALID;
-
-	{
-		int const error_code = reg_pc->type->get(reg_pc);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	uint64_t const saved_pc = buf_get_u64(reg_pc->value, 0, reg_pc->size);
-
-	uint64_t saved_regs[32];
-
-	for (int i = 0; i < num_reg_params; ++i) {
-		LOG_DEBUG("%s: save %s", target_name(target), reg_params[i].reg_name);
-		struct reg *r = register_get_by_name(target->reg_cache, reg_params[i].reg_name, 0);
-
-		if (!r) {
-			LOG_ERROR("%s: Couldn't find register named '%s'",
-					target_name(target),
-					reg_params[i].reg_name);
-			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-		}
-
-		if (r->size != reg_params[i].size) {
-			LOG_ERROR("%s: Register %s is %d bits instead of %d bits.",
-					target_name(target),
-					reg_params[i].reg_name,
-					r->size,
-					reg_params[i].size);
-			return ERROR_TARGET_INVALID;
-		}
-
-		if (GDB_REGNO_XPR31 < r->number) {
-			LOG_ERROR("%s: Only GPRs can be use as argument registers.",
-					target_name(target));
-			return ERROR_COMMAND_ARGUMENT_INVALID;
-		}
-
-		{
-			int const error_code = r->type->get(r);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-
-		saved_regs[r->number] = buf_get_u64(r->value, 0, r->size);
-
-		{
-			int const error_code = r->type->set(r, reg_params[i].value);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-	}
-
-
-	/* Disable Interrupts before attempting to run the algorithm. */
-	LOG_DEBUG("%s: Disabling Interrupts",
-			target_name(target));
-
-	struct reg *reg_mstatus =
-		register_get_by_name(target->reg_cache, "mstatus", 1);
-
-	if (!reg_mstatus) {
-		LOG_ERROR("%s: Couldn't find mstatus!",
-				target_name(target));
-		return ERROR_TARGET_INVALID;
-	}
-
-	assert(reg_mstatus->type && reg_mstatus->type->get);
-	reg_mstatus->type->get(reg_mstatus);
-	uint64_t const current_mstatus = buf_get_u64(reg_mstatus->value, 0, reg_mstatus->size);
-	{
-		uint64_t const ie_mask = MSTATUS_MIE | MSTATUS_HIE | MSTATUS_SIE | MSTATUS_UIE;
-		uint8_t mstatus_bytes[8];
-		/**
-		@todo check hart number
-		*/
-		buf_set_u64(mstatus_bytes, 0, info->harts[0].xlen, set_field(current_mstatus, ie_mask, 0));
-		assert(reg_mstatus->type->set);
-		reg_mstatus->type->set(reg_mstatus, mstatus_bytes);
-	}
-
-	/* Run algorithm */
-	LOG_DEBUG("%s: resume at 0x%" TARGET_PRIxADDR,
-			target_name(target),
-			entry_point);
-
-	{
-		int const error_code = oldriscv_resume(target, 0, entry_point, 0, 0);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	{
-		int64_t const start = timeval_ms();
-
-		while (target->state != TARGET_HALTED) {
-			LOG_DEBUG("%s: poll()", target_name(target));
-			int64_t const now = timeval_ms();
-
-			if (now > start + timeout_ms) {
-				LOG_ERROR("%s: Algorithm timed out after %d ms." "\n"
-						"  now   = 0x%08" PRIx64 "\n"
-						"  start = 0x%08" PRIx64,
-						target_name(target),
-						timeout_ms,
-						now,
-						start);
-
-				/**
-				@bug oldriscv_halt
-				*/
-				oldriscv_halt(target);
-				old_or_new_riscv_poll(target);
-				return ERROR_TARGET_TIMEOUT;
-			}
-
-			{
-				int const error_code = old_or_new_riscv_poll(target);
-
-				if (ERROR_OK != error_code)
-					return error_code;
-			}
-		}
-	}
-
-	{
-		int const error_code = reg_pc->type->get(reg_pc);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	uint64_t const final_pc = buf_get_u64(reg_pc->value, 0, reg_pc->size);
-
-	if (final_pc != exit_point) {
-		LOG_ERROR("%s: PC ended up at 0x%" PRIx64 " instead of 0x%"
-				TARGET_PRIxADDR,
-				target_name(target),
-				final_pc, exit_point);
-		return ERROR_TARGET_FAILURE;
-	}
-
-	{
-		/* Restore Interrupts */
-		/**
-		@todo restore interrupts on error too
-		*/
-		LOG_DEBUG("%s: Restoring Interrupts", target_name(target));
-		uint8_t mstatus_bytes[8];
-		buf_set_u64(mstatus_bytes, 0, info->harts[0].xlen, current_mstatus);
-		reg_mstatus->type->set(reg_mstatus, mstatus_bytes);
-	}
-
-	/* Restore registers */
-	uint8_t buf[8];
-	/**
-	@todo check hart number
-	*/
-	buf_set_u64(buf, 0, info->harts[0].xlen, saved_pc);
-
-	{
-		int const error_code = reg_pc->type->set(reg_pc, buf);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	for (int i = 0; i < num_reg_params; ++i) {
-		LOG_DEBUG("%s: restore %s", target_name(target), reg_params[i].reg_name);
-		struct reg *r = register_get_by_name(target->reg_cache, reg_params[i].reg_name, 0);
-		assert(r && r->number < DIM(saved_regs));
-		buf_set_u64(buf, 0, info->harts[0].xlen, saved_regs[r->number]);
-
-		{
-			assert(r->type && r->type->set);
-			int const error_code = r->type->set(r, buf);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-	}
-
-	return ERROR_OK;
-}
-
-/** Should run code on the target to perform CRC of memory.
-
-	@todo Not yet implemented.
-*/
-static int
-riscv_checksum_memory(struct target *const target,
-	target_addr_t const address,
-	uint32_t const count,
-	uint32_t *const checksum)
-{
-	assert(checksum);
-	*checksum = 0xFFFFFFFF;
-	return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-}
-#endif
-
 enum riscv_poll_hart_e {
 	RPH_NO_CHANGE,
 	RPH_DISCOVERED_HALTED,
@@ -6659,29 +7191,6 @@ riscv_poll_hart(struct target *const target,
 }
 
 static int
-riscv_halt_one_hart(struct target *const target, int const hartid)
-{
-	LOG_DEBUG("%s: halting hart %d", target_name(target), hartid);
-
-	{
-		int const error_code = riscv_set_current_hartid(target, hartid);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	if (riscv_is_halted(target)) {
-		LOG_DEBUG("%s:  hart %d requested halt, but was already halted",
-			target_name(target), hartid);
-		return ERROR_OK;
-	}
-
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->halt_current_hart);
-	return rvi->halt_current_hart(target);
-}
-
-int
 riscv_openocd_poll(struct target *const target)
 {
 	assert(target);
@@ -6783,7 +7292,7 @@ riscv_openocd_poll(struct target *const target)
 
 	if (target->debug_reason == DBG_REASON_BREAKPOINT) {
 		int retval;
-		if (riscv_semihosting(target, &retval) != 0)
+		if (0 != riscv_semihosting(target, &retval))
 			return retval;
 	}
 
@@ -6791,7 +7300,7 @@ riscv_openocd_poll(struct target *const target)
 	return ERROR_OK;
 }
 
-int
+static int
 riscv_openocd_halt(struct target *const target)
 {
 	assert(target);
@@ -6885,7 +7394,7 @@ riscv_step_rtos_hart(struct target *const target)
 	return ERROR_OK;
 }
 
-int
+static int
 riscv_openocd_resume(struct target *const target,
 	int const current,
 	target_addr_t const address,
@@ -6893,7 +7402,10 @@ riscv_openocd_resume(struct target *const target,
 	int const debug_execution)
 {
 	assert(target);
-	LOG_DEBUG("%s: debug_reason=%d", target_name(target), target->debug_reason);
+	LOG_DEBUG("%s: handle_breakpoints=%d  debug_reason=%d",
+		target_name(target),
+		handle_breakpoints,
+		target->debug_reason);
 
 	if (!current)
 		riscv_set_register(target, GDB_REGNO_PC, address);
@@ -6956,13 +7468,14 @@ riscv_openocd_resume(struct target *const target,
 	return ERROR_OK;
 }
 
-int
+static int
 riscv_openocd_step(struct target *const target,
 	int const current,
 	target_addr_t const address,
 	int const handle_breakpoints)
 {
-	LOG_DEBUG("%s: stepping rtos hart", target_name(target));
+	LOG_DEBUG("%s: handle_breakpoints=%d",
+		target_name(target), handle_breakpoints);
 
 	if (!current) {
 		int const error_code = riscv_set_register(target, GDB_REGNO_PC, address);
@@ -7487,122 +8000,6 @@ struct command_registration const riscv_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
-/** @return error code*/
-int
-riscv_halt_all_harts(struct target *const target)
-{
-	for (int i = 0; i < riscv_count_harts(target); ++i) {
-		if (!riscv_hart_enabled(target, i))
-			continue;
-
-		riscv_halt_one_hart(target, i);
-	}
-
-	riscv_invalidate_register_cache(target);
-
-	return ERROR_OK;
-}
-
-/** @return error code*/
-static int
-riscv_resume_one_hart(struct target *const target, int const hartid)
-{
-	LOG_DEBUG("%s: resuming hart %d", target_name(target), hartid);
-
-	{
-		int const error_code = riscv_set_current_hartid(target, hartid);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	if (!riscv_is_halted(target)) {
-		LOG_DEBUG("%s:  hart %d requested resume, but was already resumed", target_name(target), hartid);
-		return ERROR_OK;
-	}
-
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->on_resume);
-	{
-		int const error_code = rvi->on_resume(target);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-	assert(rvi->resume_current_hart);
-	return rvi->resume_current_hart(target);
-}
-
-/** @return error code*/
-int
-riscv_resume_all_harts(struct target *const target)
-{
-	int const number_of_harts = riscv_count_harts(target);
-	int error_code = ERROR_OK;
-
-	for (int i = 0; i < number_of_harts; ++i)
-		if (riscv_hart_enabled(target, i)) {
-			int const error_code_1 = riscv_resume_one_hart(target, i);
-
-			if (ERROR_OK == error_code && ERROR_OK != error_code_1)
-				error_code = error_code_1;
-		}
-
-	riscv_invalidate_register_cache(target);
-	return error_code;
-}
-
-/** @return error code */
-int
-riscv_set_current_hartid(struct target *const target,
-	int const hartid)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (!rvi->select_current_hart)
-		return ERROR_OK;
-
-	int const previous_hartid = riscv_current_hartid(target);
-	rvi->current_hartid = hartid;
-	assert(riscv_hart_enabled(target, hartid));
-	LOG_DEBUG("%s: setting hartid to %d, was %d", target_name(target), hartid, previous_hartid);
-
-	{
-		int const error_code = rvi->select_current_hart(target);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	/* This might get called during init, in which case we shouldn't be
-	 * setting up the register cache. */
-	if (!target_was_examined(target))
-		/**
-		@todo ERROR_TARGET_NOT_EXAMINED
-		*/
-		return ERROR_OK;
-
-	riscv_invalidate_register_cache(target);
-	return ERROR_OK;
-}
-
-void
-riscv_invalidate_register_cache(struct target *const target)
-{
-	register_cache_invalidate(target->reg_cache);
-
-	for (size_t i = 0; i < target->reg_cache->num_regs; ++i) {
-		struct reg *reg = &target->reg_cache->reg_list[i];
-		assert(reg);
-		reg->valid = false;
-	}
-
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-	rvi->registers_initialized = true;
-}
-
 /**
 	@return number of HARTs
 	@bug return signed value
@@ -7639,19 +8036,6 @@ riscv_set_register(struct target *const target,
 	return riscv_set_register_on_hart(target, riscv_current_hartid(target), gdb_reg_no, value);
 }
 
-/**	@return error code */
-int
-riscv_set_register_on_hart(struct target *const target,
-	int const hartid,
-	enum gdb_regno const regid,
-	uint64_t const value)
-{
-	LOG_DEBUG("%s: [%d] %s <- %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), value);
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->set_register);
-	return rvi->set_register(target, hartid, regid, value);
-}
-
 /**	@note Syntactical sugar
 	@return error code
 */
@@ -7686,14 +8070,6 @@ riscv_get_register_on_hart(struct target *const target,
 	return err;
 }
 
-bool
-riscv_is_halted(struct target *const target)
-{
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->is_halted);
-	return rvi->is_halted(target);
-}
-
 enum riscv_halt_reason
 	riscv_halt_reason(struct target *const target,
 		int const hartid)
@@ -7709,122 +8085,6 @@ enum riscv_halt_reason
 	}
 
 	return rvi->halt_reason(target);
-}
-
-bool
-riscv_hart_enabled(struct target *const target,
-	int hartid)
-{
-	/**
-	@todo FIXME: Add a hart mask to the RTOS.
-	*/
-	if (riscv_rtos_enabled(target))
-		return hartid < riscv_count_harts(target);
-
-	return hartid == target->coreid;
-}
-
-/**	@brief Count triggers, and initialize trigger_count for each hart.
-
-	trigger_count is initialized even if this function fails to discover something.
-
-	Disable any hardware triggers that have @c dmode set.
-	We can't have set them ourselves.
-	Maybe they're left over from some killed debug session.
-*/
-/** @return error code*/
-int
-riscv_enumerate_triggers(struct target *const target)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (rvi->triggers_enumerated)
-		return ERROR_OK;
-
-	for (int hartid = 0; hartid < riscv_count_harts(target); ++hartid) {
-		if (!riscv_hart_enabled(target, hartid))
-			continue;
-
-		riscv_reg_t tselect;
-		{
-			int const error_code =
-				riscv_get_register_on_hart(target, &tselect, hartid, GDB_REGNO_TSELECT);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-
-		for (unsigned t = 0; t < RISCV_MAX_TRIGGERS; ++t) {
-			rvi->harts[hartid].trigger_count = t;
-
-			riscv_set_register_on_hart(target, hartid, GDB_REGNO_TSELECT, t);
-			uint64_t tselect_rb;
-			{
-				int const error_code =
-					riscv_get_register_on_hart(target, &tselect_rb, hartid, GDB_REGNO_TSELECT);
-
-				if (ERROR_OK != error_code)
-					return error_code;
-			}
-
-			/* Mask off the top bit, which is used as @c tdrmode in old implementations. */
-			tselect_rb &= ~(1ULL << (riscv_xlen(target)-1));
-
-			if (tselect_rb != t)
-				break;
-
-			uint64_t tdata1;
-			{
-				int const error_code =
-					riscv_get_register_on_hart(target, &tdata1, hartid, GDB_REGNO_TDATA1);
-
-				if (ERROR_OK != error_code)
-					return error_code;
-			}
-
-			int const type = get_field(tdata1, MCONTROL_TYPE(riscv_xlen(target)));
-
-			switch (type) {
-				case 1:
-					{
-						/* On these older cores we don't support software using triggers. */
-						int const error_code = riscv_set_register_on_hart(target, hartid, GDB_REGNO_TDATA1, 0);
-
-						if (ERROR_OK != error_code)
-							return error_code;
-					}
-					break;
-
-				case 2:
-					if (tdata1 & MCONTROL_DMODE(riscv_xlen(target))) {
-						int const error_code = riscv_set_register_on_hart(target, hartid, GDB_REGNO_TDATA1, 0);
-
-						if (ERROR_OK != error_code)
-							return error_code;
-					}
-					break;
-
-					/**
-					@bug no default case
-					*/
-			}
-		}
-
-		{
-			int const error_code =
-				riscv_set_register_on_hart(target, hartid, GDB_REGNO_TSELECT, tselect);
-
-			if (ERROR_OK != error_code)
-				return error_code;
-		}
-
-		LOG_INFO("%s: [%d] Found %d triggers",
-			target_name(target), hartid, rvi->harts[hartid].trigger_count);
-	}
-
-	rvi->triggers_enumerated = true;
-	return ERROR_OK;
 }
 
 char const *
@@ -7938,648 +8198,18 @@ register_set(struct reg *const reg,
 	return riscv_set_register(target, reg->number, value);
 }
 
-static struct reg_arch_type const riscv_reg_arch_type = {
-	.get = register_get,
-	.set = register_set
-};
-
-struct csr_info {
-	unsigned number;
-	char const *name;
-};
-
-/** @return signed value for ordering */
-static int
-cmp_csr_info(void const *p1, void const *p2)
-{
-	struct csr_info const *const pp1 = p1;
-	struct csr_info const *const pp2 = p2;
-	return
-		(int)(pp1->number) -
-		(int)(pp2->number);
-}
-
-static struct csr_info csr_info[] = {
-#define DECLARE_CSR(name, number) { number, #name },
-#include "encoding.h"
-#undef DECLARE_CSR
-};
-
-/** @return error code*/
-int
-riscv_init_registers(struct target *const target)
-{
-	assert(target);
-	if (target->reg_cache) {
-		if (target->reg_cache->reg_list)
-			free(target->reg_cache->reg_list);
-
-		free(target->reg_cache);
-	}
-
-	target->reg_cache = calloc(1, sizeof *target->reg_cache);
-	assert(target->reg_cache);
-	target->reg_cache->name = "RISC-V Registers";
-	target->reg_cache->num_regs = GDB_REGNO_COUNT;
-
-	if (expose_custom) {
-		for (unsigned i = 0; expose_custom[i].low <= expose_custom[i].high; ++i) {
-			for (
-				unsigned number = expose_custom[i].low;
-				number <= expose_custom[i].high;
-				++number
-				)
-				++target->reg_cache->num_regs;
-		}
-	}
-
-	LOG_DEBUG("%s: create register cache for %d registers",
-			target_name(target),
-			target->reg_cache->num_regs);
-
-	target->reg_cache->reg_list =
-		calloc(target->reg_cache->num_regs, sizeof(struct reg));
-	assert(target->reg_cache->reg_list);
-
-	static unsigned const max_reg_name_len = 12;
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-
-	if (rvi->reg_names)
-		free(rvi->reg_names);
-
-	rvi->reg_names = calloc(target->reg_cache->num_regs, max_reg_name_len);
-	assert(rvi->reg_names);
-
-	typedef struct reg_feature reg_feature_t;
-	static reg_feature_t const feature_cpu = {
-		.name = "org.gnu.gdb.riscv.cpu"
-	};
-
-	static reg_feature_t const feature_fpu = {
-		.name = "org.gnu.gdb.riscv.fpu"
-	};
-
-	static reg_feature_t const feature_csr = {
-		.name = "org.gnu.gdb.riscv.csr"
-	};
-
-	static reg_feature_t const feature_virtual = {
-		.name = "org.gnu.gdb.riscv.virtual"
-	};
-
-	static reg_feature_t const feature_custom = {
-		.name = "org.gnu.gdb.riscv.custom"
-	};
-
-	typedef struct reg_data_type reg_data_type_t;
-	static reg_data_type_t const type_ieee_single = {
-		.type = REG_TYPE_IEEE_SINGLE,
-		.id = "ieee_single"
-	};
-
-	static reg_data_type_t const type_ieee_double = {
-		.type = REG_TYPE_IEEE_DOUBLE,
-		.id = "ieee_double"
-	};
-
-	/* encoding.h does not contain the registers in sorted order. */
-	qsort(csr_info, DIM(csr_info), sizeof *csr_info, cmp_csr_info);
-
-	unsigned custom_range_index = 0;
-	int custom_within_range = 0;
-
-	riscv_reg_info_t *const shared_reg_info = calloc(1, sizeof(riscv_reg_info_t));
-	assert(shared_reg_info);
-	shared_reg_info->target = target;
-
-	char *reg_name = rvi->reg_names;
-
-	/*
-		When gdb requests register N, gdb_get_register_packet() assumes
-		that this is register at index N in reg_list.
-		So if there are certain registers that don't exist,
-		we need to leave holes in the list
-		(or renumber, but it would be nice not to have yet another
-		set of numbers to translate between).
-	*/
-	for (uint32_t number = 0; number < target->reg_cache->num_regs; ++number) {
-		assert(target && target->reg_cache && target->reg_cache->reg_list && number < target->reg_cache->num_regs);
-		struct reg *const p_reg = &target->reg_cache->reg_list[number];
-		p_reg->dirty = false;
-		p_reg->valid = false;
-		p_reg->exist = true;
-		p_reg->type = &riscv_reg_arch_type;
-		p_reg->arch_info = shared_reg_info;
-		p_reg->number = number;
-		p_reg->size = riscv_xlen(target);
-
-		/* p_reg->size is set in riscv_invalidate_register_cache, maybe because the
-		 * target is in theory allowed to change XLEN on us. But I expect a lot
-		 * of other things to break in that case as well. */
-		if (number <= GDB_REGNO_XPR31) {
-			p_reg->caller_save = true;
-
-			switch (number) {
-				case GDB_REGNO_ZERO:
-					p_reg->name = "zero";
-					break;
-
-				case GDB_REGNO_RA:
-					p_reg->name = "ra";
-					break;
-
-				case GDB_REGNO_SP:
-					p_reg->name = "sp";
-					break;
-
-				case GDB_REGNO_GP:
-					p_reg->name = "gp";
-					break;
-
-				case GDB_REGNO_TP:
-					p_reg->name = "tp";
-					break;
-
-				case GDB_REGNO_T0:
-					p_reg->name = "t0";
-					break;
-
-				case GDB_REGNO_T1:
-					p_reg->name = "t1";
-					break;
-
-				case GDB_REGNO_T2:
-					p_reg->name = "t2";
-					break;
-
-				case GDB_REGNO_FP:
-					p_reg->name = "fp";
-					break;
-
-				case GDB_REGNO_S1:
-					p_reg->name = "s1";
-					break;
-
-				case GDB_REGNO_A0:
-					p_reg->name = "a0";
-					break;
-
-				case GDB_REGNO_A1:
-					p_reg->name = "a1";
-					break;
-
-				case GDB_REGNO_A2:
-					p_reg->name = "a2";
-					break;
-
-				case GDB_REGNO_A3:
-					p_reg->name = "a3";
-					break;
-
-				case GDB_REGNO_A4:
-					p_reg->name = "a4";
-					break;
-
-				case GDB_REGNO_A5:
-					p_reg->name = "a5";
-					break;
-
-				case GDB_REGNO_A6:
-					p_reg->name = "a6";
-					break;
-
-				case GDB_REGNO_A7:
-					p_reg->name = "a7";
-					break;
-
-				case GDB_REGNO_S2:
-					p_reg->name = "s2";
-					break;
-
-				case GDB_REGNO_S3:
-					p_reg->name = "s3";
-					break;
-
-				case GDB_REGNO_S4:
-					p_reg->name = "s4";
-					break;
-
-				case GDB_REGNO_S5:
-					p_reg->name = "s5";
-					break;
-
-				case GDB_REGNO_S6:
-					p_reg->name = "s6";
-					break;
-
-				case GDB_REGNO_S7:
-					p_reg->name = "s7";
-					break;
-
-				case GDB_REGNO_S8:
-					p_reg->name = "s8";
-					break;
-
-				case GDB_REGNO_S9:
-					p_reg->name = "s9";
-					break;
-
-				case GDB_REGNO_S10:
-					p_reg->name = "s10";
-					break;
-
-				case GDB_REGNO_S11:
-					p_reg->name = "s11";
-					break;
-
-				case GDB_REGNO_T3:
-					p_reg->name = "t3";
-					break;
-
-				case GDB_REGNO_T4:
-					p_reg->name = "t4";
-					break;
-
-				case GDB_REGNO_T5:
-					p_reg->name = "t5";
-					break;
-
-				case GDB_REGNO_T6:
-					p_reg->name = "t6";
-					break;
-			}
-
-			p_reg->group = "general";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_cpu);
-		} else if (number == GDB_REGNO_PC) {
-			p_reg->caller_save = true;
-			reg_name[max_reg_name_len - 1] = '\0';
-			snprintf(reg_name, max_reg_name_len - 1, "pc");
-			p_reg->group = "general";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_cpu);
-		} else if (GDB_REGNO_FPR0 <= number && number <= GDB_REGNO_FPR31) {
-			p_reg->caller_save = true;
-
-			if (riscv_supports_extension(target, riscv_current_hartid(target), 'D')) {
-				/**
-				@todo This should probably be const.
-				*/
-				p_reg->reg_data_type = (reg_data_type_t *)(&type_ieee_double);
-				p_reg->size = 64;
-			} else if (riscv_supports_extension(target, riscv_current_hartid(target), 'F')) {
-				/**
-				@todo This should probably be const.
-				*/
-				p_reg->reg_data_type = (reg_data_type_t *)(&type_ieee_single);
-				p_reg->size = 32;
-			} else {
-				p_reg->exist = false;
-			}
-
-			switch (number) {
-				case GDB_REGNO_FT0:
-					p_reg->name = "ft0";
-					break;
-
-				case GDB_REGNO_FT1:
-					p_reg->name = "ft1";
-					break;
-
-				case GDB_REGNO_FT2:
-					p_reg->name = "ft2";
-					break;
-
-				case GDB_REGNO_FT3:
-					p_reg->name = "ft3";
-					break;
-
-				case GDB_REGNO_FT4:
-					p_reg->name = "ft4";
-					break;
-
-				case GDB_REGNO_FT5:
-					p_reg->name = "ft5";
-					break;
-
-				case GDB_REGNO_FT6:
-					p_reg->name = "ft6";
-					break;
-
-				case GDB_REGNO_FT7:
-					p_reg->name = "ft7";
-					break;
-
-				case GDB_REGNO_FS0:
-					p_reg->name = "fs0";
-					break;
-
-				case GDB_REGNO_FS1:
-					p_reg->name = "fs1";
-					break;
-
-				case GDB_REGNO_FA0:
-					p_reg->name = "fa0";
-					break;
-
-				case GDB_REGNO_FA1:
-					p_reg->name = "fa1";
-					break;
-
-				case GDB_REGNO_FA2:
-					p_reg->name = "fa2";
-					break;
-
-				case GDB_REGNO_FA3:
-					p_reg->name = "fa3";
-					break;
-
-				case GDB_REGNO_FA4:
-					p_reg->name = "fa4";
-					break;
-
-				case GDB_REGNO_FA5:
-					p_reg->name = "fa5";
-					break;
-
-				case GDB_REGNO_FA6:
-					p_reg->name = "fa6";
-					break;
-
-				case GDB_REGNO_FA7:
-					p_reg->name = "fa7";
-					break;
-
-				case GDB_REGNO_FS2:
-					p_reg->name = "fs2";
-					break;
-
-				case GDB_REGNO_FS3:
-					p_reg->name = "fs3";
-					break;
-
-				case GDB_REGNO_FS4:
-					p_reg->name = "fs4";
-					break;
-
-				case GDB_REGNO_FS5:
-					p_reg->name = "fs5";
-					break;
-
-				case GDB_REGNO_FS6:
-					p_reg->name = "fs6";
-					break;
-
-				case GDB_REGNO_FS7:
-					p_reg->name = "fs7";
-					break;
-
-				case GDB_REGNO_FS8:
-					p_reg->name = "fs8";
-					break;
-
-				case GDB_REGNO_FS9:
-					p_reg->name = "fs9";
-					break;
-
-				case GDB_REGNO_FS10:
-					p_reg->name = "fs10";
-					break;
-
-				case GDB_REGNO_FS11:
-					p_reg->name = "fs11";
-					break;
-
-				case GDB_REGNO_FT8:
-					p_reg->name = "ft8";
-					break;
-
-				case GDB_REGNO_FT9:
-					p_reg->name = "ft9";
-					break;
-
-				case GDB_REGNO_FT10:
-					p_reg->name = "ft10";
-					break;
-
-				case GDB_REGNO_FT11:
-					p_reg->name = "ft11";
-					break;
-				/**
-				@bug no default case
-				*/
-			}
-
-			p_reg->group = "float";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_fpu);
-		} else if (GDB_REGNO_CSR0 <= number && number <= GDB_REGNO_CSR4095) {
-			p_reg->group = "csr";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_csr);
-			unsigned const csr_number = number - GDB_REGNO_CSR0;
-
-			unsigned csr_info_index = 0;
-			while (csr_info[csr_info_index].number < csr_number && csr_info_index < DIM(csr_info) - 1)
-				++csr_info_index;
-
-			if (csr_info[csr_info_index].number == csr_number) {
-				p_reg->name = csr_info[csr_info_index].name;
-			} else {
-				reg_name[max_reg_name_len - 1] = '\0';
-				snprintf(reg_name, max_reg_name_len - 1, "csr%d", csr_number);
-				/* Assume unnamed registers don't exist, unless we have some
-				 * configuration that tells us otherwise. That's important
-				 * because eg. Eclipse crashes if a target has too many
-				 * registers, and apparently has no way of only showing a
-				 * subset of registers in any case. */
-				p_reg->exist = false;
-			}
-
-			switch (csr_number) {
-				case CSR_FFLAGS:
-				case CSR_FRM:
-				case CSR_FCSR:
-					p_reg->exist =
-						riscv_supports_extension(target, riscv_current_hartid(target), 'F');
-					p_reg->group = "float";
-					/**
-					@todo This should probably be const.
-					*/
-					p_reg->feature = (reg_feature_t *)&feature_fpu;
-					break;
-
-				case CSR_SSTATUS:
-				case CSR_STVEC:
-				case CSR_SIP:
-				case CSR_SIE:
-				case CSR_SCOUNTEREN:
-				case CSR_SSCRATCH:
-				case CSR_SEPC:
-				case CSR_SCAUSE:
-				case CSR_STVAL:
-				case CSR_SATP:
-					p_reg->exist = riscv_supports_extension(target,
-							riscv_current_hartid(target), 'S');
-					break;
-
-				case CSR_MEDELEG:
-				case CSR_MIDELEG:
-					/* "In systems with only M-mode, or with both M-mode and
-					 * U-mode but without U-mode trap support, the medeleg and
-					 * mideleg registers should not exist." */
-					p_reg->exist = riscv_supports_extension(target, riscv_current_hartid(target), 'S') ||
-						riscv_supports_extension(target, riscv_current_hartid(target), 'N');
-					break;
-
-				case CSR_CYCLEH:
-				case CSR_TIMEH:
-				case CSR_INSTRETH:
-				case CSR_HPMCOUNTER3H:
-				case CSR_HPMCOUNTER4H:
-				case CSR_HPMCOUNTER5H:
-				case CSR_HPMCOUNTER6H:
-				case CSR_HPMCOUNTER7H:
-				case CSR_HPMCOUNTER8H:
-				case CSR_HPMCOUNTER9H:
-				case CSR_HPMCOUNTER10H:
-				case CSR_HPMCOUNTER11H:
-				case CSR_HPMCOUNTER12H:
-				case CSR_HPMCOUNTER13H:
-				case CSR_HPMCOUNTER14H:
-				case CSR_HPMCOUNTER15H:
-				case CSR_HPMCOUNTER16H:
-				case CSR_HPMCOUNTER17H:
-				case CSR_HPMCOUNTER18H:
-				case CSR_HPMCOUNTER19H:
-				case CSR_HPMCOUNTER20H:
-				case CSR_HPMCOUNTER21H:
-				case CSR_HPMCOUNTER22H:
-				case CSR_HPMCOUNTER23H:
-				case CSR_HPMCOUNTER24H:
-				case CSR_HPMCOUNTER25H:
-				case CSR_HPMCOUNTER26H:
-				case CSR_HPMCOUNTER27H:
-				case CSR_HPMCOUNTER28H:
-				case CSR_HPMCOUNTER29H:
-				case CSR_HPMCOUNTER30H:
-				case CSR_HPMCOUNTER31H:
-				case CSR_MCYCLEH:
-				case CSR_MINSTRETH:
-				case CSR_MHPMCOUNTER3H:
-				case CSR_MHPMCOUNTER4H:
-				case CSR_MHPMCOUNTER5H:
-				case CSR_MHPMCOUNTER6H:
-				case CSR_MHPMCOUNTER7H:
-				case CSR_MHPMCOUNTER8H:
-				case CSR_MHPMCOUNTER9H:
-				case CSR_MHPMCOUNTER10H:
-				case CSR_MHPMCOUNTER11H:
-				case CSR_MHPMCOUNTER12H:
-				case CSR_MHPMCOUNTER13H:
-				case CSR_MHPMCOUNTER14H:
-				case CSR_MHPMCOUNTER15H:
-				case CSR_MHPMCOUNTER16H:
-				case CSR_MHPMCOUNTER17H:
-				case CSR_MHPMCOUNTER18H:
-				case CSR_MHPMCOUNTER19H:
-				case CSR_MHPMCOUNTER20H:
-				case CSR_MHPMCOUNTER21H:
-				case CSR_MHPMCOUNTER22H:
-				case CSR_MHPMCOUNTER23H:
-				case CSR_MHPMCOUNTER24H:
-				case CSR_MHPMCOUNTER25H:
-				case CSR_MHPMCOUNTER26H:
-				case CSR_MHPMCOUNTER27H:
-				case CSR_MHPMCOUNTER28H:
-				case CSR_MHPMCOUNTER29H:
-				case CSR_MHPMCOUNTER30H:
-				case CSR_MHPMCOUNTER31H:
-					p_reg->exist = riscv_xlen(target) == 32;
-					break;
-			}
-
-			if (!p_reg->exist && expose_csr) {
-				for (unsigned i = 0; expose_csr[i].low <= expose_csr[i].high; ++i) {
-					if (csr_number >= expose_csr[i].low && csr_number <= expose_csr[i].high) {
-						LOG_INFO("%s: Exposing additional CSR %d", target_name(target), csr_number);
-						p_reg->exist = true;
-						break;
-					}
-				}
-			}
-
-		} else if (number == GDB_REGNO_PRIV) {
-			reg_name[max_reg_name_len - 1] = '\0';
-			snprintf(reg_name, max_reg_name_len - 1, "priv");
-			p_reg->group = "general";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_virtual);
-			p_reg->size = 8;
-
-		} else {
-			/* Custom registers. */
-			assert(expose_custom);
-
-			range_t *const range = &expose_custom[custom_range_index];
-			assert(range->low <= range->high);
-			unsigned const custom_number = range->low + custom_within_range;
-
-			p_reg->group = "custom";
-			/**
-			@todo This should probably be const.
-			*/
-			p_reg->feature = (reg_feature_t *)(&feature_custom);
-			p_reg->arch_info = calloc(1, sizeof(riscv_reg_info_t));
-			assert(p_reg->arch_info);
-			((riscv_reg_info_t *)(p_reg->arch_info))->target = target;
-			((riscv_reg_info_t *)(p_reg->arch_info))->custom_number = custom_number;
-			reg_name[max_reg_name_len - 1] = '\0';
-			snprintf(reg_name, max_reg_name_len - 1, "custom%d", custom_number);
-
-			++custom_within_range;
-
-			if (custom_within_range > range->high - range->low) {
-				custom_within_range = 0;
-				++custom_range_index;
-			}
-		}
-
-		if (*reg_name)
-			p_reg->name = reg_name;
-
-		reg_name += strlen(reg_name) + 1;
-		assert(reg_name < rvi->reg_names + target->reg_cache->num_regs * max_reg_name_len);
-		p_reg->value = &rvi->reg_cache_values[number];
-	}
-
-	return ERROR_OK;
-}
-
 struct target_type riscv_target = {
 	.name = "riscv",
-	.poll = old_or_new_riscv_poll,
-	.arch_state = riscv_arch_state,
+	.poll = riscv_openocd_poll,
+	.arch_state = riscv_013_arch_state,
 #if 0
 	.target_request_data = NULL,
 #endif
-	.halt = old_or_new_riscv_halt,
-	.resume = old_or_new_riscv_resume,
-	.step = old_or_new_riscv_step,
-	.assert_reset = riscv_assert_reset,
-	.deassert_reset = riscv_deassert_reset,
+	.halt = riscv_openocd_halt,
+	.resume = riscv_openocd_resume,
+	.step = riscv_openocd_step,
+	.assert_reset = riscv_013_assert_reset,
+	.deassert_reset = riscv_013_deassert_reset,
 #if 0
 	.soft_reset_halt = NULL,
 #endif
