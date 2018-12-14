@@ -156,6 +156,16 @@ enum memory_space_e {
 };
 typedef enum memory_space_e memory_space_t;
 
+enum riscv_halt_reason_e {
+	RISCV_HALT_INTERRUPT,
+	RISCV_HALT_BREAKPOINT,
+	RISCV_HALT_SINGLESTEP,
+	RISCV_HALT_TRIGGER,
+	RISCV_HALT_UNKNOWN,
+	RISCV_HALT_ERROR
+};
+typedef enum riscv_halt_reason_e riscv_halt_reason_t;
+
 struct dm013_info_s {
 	struct list_head list;
 	int abs_chain_position;
@@ -472,7 +482,7 @@ __attribute__((pure))
 get_info(struct target const *const target)
 {
 	assert(target);
-	struct riscv_info_t const *const info = target->arch_info;
+	riscv_info_t const *const info = target->arch_info;
 	assert(info);
 	return info->version_specific;
 }
@@ -1506,7 +1516,7 @@ riscv_supports_extension(struct target *const target,
 	else
 		return false;
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS && num <= ('Z' - 'A'));
 	return rvi->harts[hartid].misa & (1 << num);
 }
@@ -1595,7 +1605,7 @@ riscv_013_register_write_direct(struct target *const target,
 	riscv_013_info_t const *const info = get_info(target);
 	assert(info);
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
 	if (ERROR_OK == result || info->progbufsize + rvi->impebreak < 2 || !riscv_is_halted(target))
@@ -1765,7 +1775,7 @@ riscv_013_register_read_direct(struct target *const target,
 	riscv_013_info_t *const info = get_info(target);
 	assert(info);
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
 	if (ERROR_OK != result && 2 <= info->progbufsize + rvi->impebreak && GDB_REGNO_XPR31 < number) {
@@ -1906,7 +1916,7 @@ static void
 riscv_013_deinit_target(struct target *const target)
 {
 	LOG_DEBUG("%s: riscv_deinit_target()", target_name(target));
-	struct riscv_info_t *const info = target->arch_info;
+	riscv_info_t *const info = target->arch_info;
 	assert(info);
 	free(info->version_specific);
 	/**
@@ -1920,7 +1930,7 @@ static int
 riscv_013_select_current_hart(struct target *const target)
 {
 	dm013_info_t *const dm = get_dm(target);
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi && dm);
 
 	if (rvi->current_hartid == dm->current_hartid)
@@ -1949,7 +1959,7 @@ riscv_013_select_current_hart(struct target *const target)
 static int
 riscv_013_halt_current_hart(struct target *const target)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 	LOG_DEBUG("%s: halting hart %d", target_name(target), rvi->current_hartid);
 
@@ -2082,7 +2092,7 @@ riscv_013_assert_reset(struct target *const target)
 			return error_code;
 	} else {
 		/* Reset just this hart. */
-		struct riscv_info_t const *const rvi = riscv_info(target);
+		riscv_info_t const *const rvi = riscv_info(target);
 		assert(rvi);
 		uint32_t control =
 			set_field(
@@ -2119,7 +2129,7 @@ riscv_013_deassert_reset(struct target *const target)
 		set_field(
 			set_field(0, DMI_DMCONTROL_HALTREQ, target->reset_halt ? 1 : 0),
 			DMI_DMCONTROL_DMACTIVE, 1);
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	{
 		int const error_code = dmi_write(target, DMI_DMCONTROL, set_hartsel(control, rvi->current_hartid));
 
@@ -2244,7 +2254,7 @@ riscv_invalidate_register_cache(struct target *const target)
 		reg->valid = false;
 	}
 
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	rvi->registers_initialized = true;
 }
@@ -2258,7 +2268,7 @@ static int
 riscv_set_current_hartid(struct target *const target,
 	int const hartid)
 {
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	int const previous_hartid = riscv_current_hartid(target);
@@ -3662,6 +3672,76 @@ riscv_013_write_memory(struct target *const target,
 	return ERROR_TARGET_INVALID;
 }
 
+static char const *
+gdb_regno_name(enum gdb_regno const regno)
+{
+	switch (regno) {
+	case GDB_REGNO_ZERO:
+		return "zero";
+
+	case GDB_REGNO_S0:
+		return "s0";
+
+	case GDB_REGNO_S1:
+		return "s1";
+
+	case GDB_REGNO_PC:
+		return "pc";
+
+	case GDB_REGNO_FPR0:
+		return "fpr0";
+
+	case GDB_REGNO_FPR31:
+		return "fpr31";
+
+	case GDB_REGNO_CSR0:
+		return "csr0";
+
+	case GDB_REGNO_TSELECT:
+		return "tselect";
+
+	case GDB_REGNO_TDATA1:
+		return "tdata1";
+
+	case GDB_REGNO_TDATA2:
+		return "tdata2";
+
+	case GDB_REGNO_MISA:
+		return "misa";
+
+	case GDB_REGNO_DPC:
+		return "dpc";
+
+	case GDB_REGNO_DCSR:
+		return "dcsr";
+
+	case GDB_REGNO_DSCRATCH:
+		return "dscratch";
+
+	case GDB_REGNO_MSTATUS:
+		return "mstatus";
+
+	case GDB_REGNO_PRIV:
+		return "priv";
+
+	default:
+		{
+			static char buf[32] = {[31] = '\0'};
+
+			if (regno <= GDB_REGNO_XPR31)
+				snprintf(buf, sizeof buf - 1, "x%d", regno - GDB_REGNO_ZERO);
+			else if (GDB_REGNO_CSR0 <= regno && regno <= GDB_REGNO_CSR4095)
+				snprintf(buf, sizeof buf - 1, "csr%d", regno - GDB_REGNO_CSR0);
+			else if (GDB_REGNO_FPR0 <= regno && regno <= GDB_REGNO_FPR31)
+				snprintf(buf, sizeof buf - 1, "f%d", regno - GDB_REGNO_FPR0);
+			else
+				snprintf(buf, sizeof buf - 1, "gdb_regno_%d", regno);
+
+			return buf;
+		}
+	}
+}
+
 /** @return error code */
 static int
 __attribute__((warn_unused_result))
@@ -3762,7 +3842,7 @@ Maybe they're left over from some killed debug session.
 static int
 riscv_enumerate_triggers(struct target *const target)
 {
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	if (rvi->triggers_enumerated)
@@ -3856,7 +3936,7 @@ riscv_enumerate_triggers(struct target *const target)
 /**
 @bug nonhandled errors
 */
-static enum riscv_halt_reason
+static riscv_halt_reason_t
 riscv_013_halt_reason(struct target *const target)
 {
 	riscv_reg_t dcsr;
@@ -3892,8 +3972,8 @@ riscv_013_halt_reason(struct target *const target)
 }
 
 /** @return error code */
-static int
-riscv_013_write_debug_buffer(struct target *const target,
+int
+riscv_write_debug_buffer(struct target *const target,
 	unsigned const index,
 	riscv_insn_t const data)
 {
@@ -3903,8 +3983,8 @@ riscv_013_write_debug_buffer(struct target *const target,
 /**
 @bug non handled errors, possible invalid result
 */
-static riscv_insn_t
-riscv_013_read_debug_buffer(struct target *const target,
+riscv_insn_t
+riscv_read_debug_buffer(struct target *const target,
 	unsigned const index)
 {
 	uint32_t value;
@@ -3922,8 +4002,8 @@ riscv_013_read_debug_buffer(struct target *const target,
 }
 
 /** @return error code */
-static int
-riscv_013_execute_debug_buffer(struct target *const target)
+int
+riscv_execute_debug_buffer(struct target *const target)
 {
 	uint32_t const run_program =
 		set_field(
@@ -3938,8 +4018,8 @@ riscv_013_execute_debug_buffer(struct target *const target)
 	return execute_abstract_command(target, run_program);
 }
 
-static void
-riscv_013_fill_dmi_write_u64(struct target *const target,
+void
+riscv_fill_dmi_write_u64(struct target *const target,
 	uint8_t *const buf/**<[out]*/,
 	int const a,
 	uint64_t const d)
@@ -3950,8 +4030,8 @@ riscv_013_fill_dmi_write_u64(struct target *const target,
 	buf_set_u64(buf, DTM_DMI_ADDRESS_OFFSET, info->abits, a);
 }
 
-static void
-riscv_013_fill_dmi_read_u64(struct target *const target,
+void
+riscv_fill_dmi_read_u64(struct target *const target,
 	uint8_t *const buf/**<[out]*/,
 	int a)
 {
@@ -3961,8 +4041,8 @@ riscv_013_fill_dmi_read_u64(struct target *const target,
 	buf_set_u64(buf, DTM_DMI_ADDRESS_OFFSET, info->abits, a);
 }
 
-static void
-riscv_013_fill_dmi_nop_u64(struct target *const target,
+void
+riscv_fill_dmi_nop_u64(struct target *const target,
 	uint8_t *const buf/**<[out]*/)
 {
 	riscv_013_info_t *const info = get_info(target);
@@ -4506,8 +4586,8 @@ riscv_013_test_sba_config_reg(struct target *const target,
 	}
 }
 
-static int
-riscv_013_dmi_write_u64_bits(struct target *const target)
+int
+riscv_dmi_write_u64_bits(struct target *const target)
 {
 	riscv_013_info_t *const info = get_info(target);
 	return info->abits + DTM_DMI_DATA_LENGTH + DTM_DMI_OP_LENGTH;
@@ -4518,7 +4598,7 @@ static int
 maybe_execute_fence_i(struct target *const target)
 {
 	riscv_013_info_t *const info = get_info(target);
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	if (info->progbufsize + rvi->impebreak >= 3)
@@ -4574,7 +4654,7 @@ static int
 riscv_013_step_or_resume_current_hart(struct target *const target,
 	bool const step)
 {
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	LOG_DEBUG("%s: resuming hart %d (for step?=%d)",
 		target_name(target), rvi->current_hartid, step);
@@ -4726,10 +4806,8 @@ riscv_resume_one_hart(struct target *const target, int const hartid)
 		return ERROR_OK;
 	}
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && rvi->on_resume);
 	{
-		int const error_code = rvi->on_resume(target);
+		int const error_code = riscv_013_on_resume(target);
 
 		if (ERROR_OK != error_code)
 			return error_code;
@@ -4760,6 +4838,21 @@ riscv_resume_all_harts(struct target *const target)
 
 	riscv_invalidate_register_cache(target);
 	return error_code;
+}
+
+static riscv_halt_reason_t
+	riscv_halt_reason(struct target *const target,
+		int const hartid)
+{
+	if (ERROR_OK != riscv_set_current_hartid(target, hartid))
+		return RISCV_HALT_ERROR;
+
+	if (!riscv_is_halted(target)) {
+		LOG_ERROR("%s: Hart is not halted!", target_name(target));
+		return RISCV_HALT_UNKNOWN;
+	}
+
+	return riscv_013_halt_reason(target);
 }
 
 /** @return error code */
@@ -5278,7 +5371,7 @@ riscv_init_registers(struct target *const target)
 	assert(target->reg_cache->reg_list);
 
 	static unsigned const max_reg_name_len = 12;
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	if (rvi->reg_names)
@@ -6008,7 +6101,7 @@ riscv_013_examine(struct target *const target)
 
 	LOG_INFO("%s: datacount=%d progbufsize=%d", target_name(target), info->datacount, info->progbufsize);
 
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	rvi->impebreak = get_field(dmstatus, DMI_DMSTATUS_IMPEBREAK);
 
@@ -6193,17 +6286,9 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 {
 	assert(target);
 	LOG_DEBUG("%s: init", target_name(target));
-	struct riscv_info_t *const generic_info = target->arch_info;
+	riscv_info_t *const generic_info = target->arch_info;
 	assert(generic_info);
 
-	generic_info->on_resume = &riscv_013_on_resume;
-	generic_info->read_debug_buffer = &riscv_013_read_debug_buffer;
-	generic_info->write_debug_buffer = &riscv_013_write_debug_buffer;
-	generic_info->execute_debug_buffer = &riscv_013_execute_debug_buffer;
-	generic_info->fill_dmi_write_u64 = &riscv_013_fill_dmi_write_u64;
-	generic_info->fill_dmi_read_u64 = &riscv_013_fill_dmi_read_u64;
-	generic_info->fill_dmi_nop_u64 = &riscv_013_fill_dmi_nop_u64;
-	generic_info->dmi_write_u64_bits = &riscv_013_dmi_write_u64_bits;
 	generic_info->version_specific = calloc(1, sizeof(riscv_013_info_t));
 
 	if (!generic_info->version_specific) {
@@ -6236,13 +6321,13 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 }
 
 /** Create the shared RISC-V structure. 
-	@see struct riscv_info_t
+	@see riscv_info_t
 */
-static struct riscv_info_t *
+static riscv_info_t *
 __attribute__((warn_unused_result))
 riscv_info_init(struct target *const target)
 {
-	struct riscv_info_t *const r = calloc(1, sizeof(struct riscv_info_t));
+	riscv_info_t *const r = calloc(1, sizeof(riscv_info_t));
 
 	if (!r) {
 		LOG_ERROR("%s: Fatal: No free memory!", target_name(target));
@@ -6282,7 +6367,7 @@ riscv_init_target(struct command_context *const cmd_ctx,
 		return ERROR_TARGET_INVALID;
 	}
 
-	struct riscv_info_t *const info = target->arch_info;
+	riscv_info_t *const info = target->arch_info;
 	info->cmd_ctx = cmd_ctx;
 
 	assert(target->tap);
@@ -6298,7 +6383,7 @@ riscv_deinit_target(struct target *const target)
 {
 	LOG_DEBUG("%s: riscv_deinit_target()", target_name(target));
 	riscv_013_deinit_target(target);
-	struct riscv_info_t *const info = target->arch_info;
+	riscv_info_t *const info = target->arch_info;
 	free(info->reg_names);
 	free(info);
 
@@ -6354,7 +6439,7 @@ maybe_add_trigger_t1(struct target *const target,
 	}
 
 	assert(trigger);
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 	tdata1 = set_field(tdata1, bpcontrol_r, trigger->read);
 	tdata1 = set_field(tdata1, bpcontrol_w, trigger->write);
@@ -6397,7 +6482,7 @@ maybe_add_trigger_t2(struct target *const target,
 	struct trigger *const trigger,
 	uint64_t tdata1)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 
 	/* tselect is already set */
 	if (0 != (tdata1 & (MCONTROL_EXECUTE | MCONTROL_STORE | MCONTROL_LOAD))) {
@@ -6499,7 +6584,7 @@ add_trigger(struct target *const target,
 
 	assert(first_hart >= 0);
 
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	unsigned i;
@@ -6686,7 +6771,7 @@ remove_trigger(struct target *const target,
 
 	assert(first_hart >= 0);
 	assert(trigger);
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
 	unsigned i;
@@ -6974,7 +7059,7 @@ riscv_examine(struct target *const target)
 	}
 
 	LOG_DEBUG("%s: dtmcontrol=0x%x", target_name(target), dtmcontrol);
-	struct riscv_info_t *const info = target->arch_info;
+	riscv_info_t *const info = target->arch_info;
 	info->dtm_version = get_field(dtmcontrol, DTMCONTROL_VERSION);
 	LOG_DEBUG("%s:  version=0x%x", target_name(target), info->dtm_version);
 
@@ -6993,7 +7078,7 @@ static int
 riscv_select_current_hart(struct target *const target)
 {
 	if (riscv_rtos_enabled(target)) {
-		struct riscv_info_t *const rvi = riscv_info(target);
+		riscv_info_t *const rvi = riscv_info(target);
 		assert(rvi);
 
 		if (rvi->rtos_hartid == -1)
@@ -7083,7 +7168,7 @@ riscv_get_gdb_reg_list(struct target *const target,
 	LOG_DEBUG("%s: reg_class=%d",
 		target_name(target), reg_class);
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
 	LOG_DEBUG("%s: rtos_hartid=%d current_hartid=%d",
@@ -7294,7 +7379,7 @@ riscv_openocd_halt(struct target *const target)
 	register_cache_invalidate(target->reg_cache);
 
 	if (riscv_rtos_enabled(target)) {
-		struct riscv_info_t const *const rvi = riscv_info(target);
+		riscv_info_t const *const rvi = riscv_info(target);
 		assert(rvi);
 
 		if (rvi->rtos_hartid != -1) {
@@ -7317,7 +7402,7 @@ riscv_openocd_halt(struct target *const target)
 int
 riscv_step_rtos_hart(struct target *const target)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 	int hartid = rvi->current_hartid;
 
@@ -7657,7 +7742,7 @@ COMMAND_HANDLER(riscv_authdata_read)
 		return ERROR_TARGET_INVALID;
 	}
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 
 	if (!rvi) {
 		LOG_ERROR("%s: riscv_info is NULL!",
@@ -7709,7 +7794,7 @@ COMMAND_HANDLER(riscv_dmi_read)
 		return ERROR_TARGET_INVALID;
 	}
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 
 	if (!rvi) {
 		LOG_ERROR("%s: riscv_info is NULL!", target_name(target));
@@ -7771,7 +7856,7 @@ COMMAND_HANDLER(riscv_test_sba_config_reg)
 	COMMAND_PARSE_ON_OFF(CMD_ARGV[3], run_sbbusyerror_test);
 
 	struct target *const target = get_current_target(CMD_CTX);
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
 	return
@@ -7946,7 +8031,7 @@ riscv_count_harts(struct target const *const target)
 	if (target == NULL)
 		return 1;
 
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 
 	if (!rvi)
 		return 1;
@@ -7999,91 +8084,6 @@ riscv_get_register_on_hart(struct target *const target,
 	assert(value);
 	LOG_DEBUG("%s: [%d] %s: %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), *value);
 	return err;
-}
-
-enum riscv_halt_reason
-	riscv_halt_reason(struct target *const target,
-		int const hartid)
-{
-	if (ERROR_OK != riscv_set_current_hartid(target, hartid))
-		return RISCV_HALT_ERROR;
-
-	if (!riscv_is_halted(target)) {
-		LOG_ERROR("%s: Hart is not halted!", target_name(target));
-		return RISCV_HALT_UNKNOWN;
-	}
-
-	return riscv_013_halt_reason(target);
-}
-
-char const *
-gdb_regno_name(enum gdb_regno const regno)
-{
-	switch (regno) {
-		case GDB_REGNO_ZERO:
-			return "zero";
-
-		case GDB_REGNO_S0:
-			return "s0";
-
-		case GDB_REGNO_S1:
-			return "s1";
-
-		case GDB_REGNO_PC:
-			return "pc";
-
-		case GDB_REGNO_FPR0:
-			return "fpr0";
-
-		case GDB_REGNO_FPR31:
-			return "fpr31";
-
-		case GDB_REGNO_CSR0:
-			return "csr0";
-
-		case GDB_REGNO_TSELECT:
-			return "tselect";
-
-		case GDB_REGNO_TDATA1:
-			return "tdata1";
-
-		case GDB_REGNO_TDATA2:
-			return "tdata2";
-
-		case GDB_REGNO_MISA:
-			return "misa";
-
-		case GDB_REGNO_DPC:
-			return "dpc";
-
-		case GDB_REGNO_DCSR:
-			return "dcsr";
-
-		case GDB_REGNO_DSCRATCH:
-			return "dscratch";
-
-		case GDB_REGNO_MSTATUS:
-			return "mstatus";
-
-		case GDB_REGNO_PRIV:
-			return "priv";
-
-		default:
-			{
-				static char buf[32] = {[31]='\0'};
-
-				if (regno <= GDB_REGNO_XPR31)
-					snprintf(buf, sizeof buf - 1, "x%d", regno - GDB_REGNO_ZERO);
-				else if (GDB_REGNO_CSR0 <= regno && regno <= GDB_REGNO_CSR4095)
-					snprintf(buf, sizeof buf - 1, "csr%d", regno - GDB_REGNO_CSR0);
-				else if (GDB_REGNO_FPR0 <= regno && regno <= GDB_REGNO_FPR31)
-					snprintf(buf, sizeof buf - 1, "f%d", regno - GDB_REGNO_FPR0);
-				else
-					snprintf(buf, sizeof buf - 1, "gdb_regno_%d", regno);
-
-				return buf;
-			}
-	}
 }
 
 /** @return error code*/

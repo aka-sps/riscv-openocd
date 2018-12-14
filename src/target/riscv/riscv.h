@@ -116,18 +116,6 @@ enum gdb_regno {
 	GDB_REGNO_COUNT
 };
 
-char const *
-gdb_regno_name(enum gdb_regno regno);
-
-enum riscv_halt_reason {
-	RISCV_HALT_INTERRUPT,
-	RISCV_HALT_BREAKPOINT,
-	RISCV_HALT_SINGLESTEP,
-	RISCV_HALT_TRIGGER,
-	RISCV_HALT_UNKNOWN,
-	RISCV_HALT_ERROR
-};
-
 struct HART_register_s {
 #if 0
 	uint64_t saved;
@@ -152,7 +140,7 @@ struct HART_s {
 	int debug_buffer_size;
 };
 
-struct riscv_info_t {
+struct riscv_info_s {
 	unsigned dtm_version;
 
 	struct command_context *cmd_ctx;
@@ -206,30 +194,11 @@ struct riscv_info_t {
 	bool impebreak;
 
 	bool triggers_enumerated;
-
-	int (__attribute__((warn_unused_result)) *on_resume)(struct target *target);
-	/**
-	@todo check error code
-	*/
-	/**@{*/
-	int(*write_debug_buffer)(struct target *target, unsigned index, riscv_insn_t d);
-	riscv_insn_t (*read_debug_buffer)(struct target *target, unsigned index);
-	/**@}*/
-
-	int (__attribute__((warn_unused_result)) *execute_debug_buffer)(struct target *target);
-	int (__attribute__((warn_unused_result)) *dmi_write_u64_bits)(struct target *target);
-	/**
-	@todo check error code
-	*/
-	/**@{*/
-	void (*fill_dmi_write_u64)(struct target *target, uint8_t *buf, int a, uint64_t d);
-	void (*fill_dmi_read_u64)(struct target *target, uint8_t *buf, int a);
-	void (*fill_dmi_nop_u64)(struct target *target, uint8_t *buf);
-	/**@}*/
 };
+typedef struct riscv_info_s riscv_info_t;
 
 /** Everything needs the RISC-V specific info structure, so here's a nice macro that provides that. */
-static inline struct riscv_info_t *
+static inline riscv_info_t *
 __attribute__((warn_unused_result, pure))
 riscv_info(struct target const *const target)
 {
@@ -253,7 +222,7 @@ static inline int
 __attribute__((warn_unused_result, pure))
 riscv_current_hartid(struct target const *const target)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 	return rvi->current_hartid;
 }
@@ -265,7 +234,7 @@ __attribute__((pure))
 riscv_xlen_of_hart(struct target const *const target,
 	int const hartid)
 {
-	struct riscv_info_t const *const rvi = riscv_info(target);
+	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS);
 	assert(rvi->harts[hartid].xlen != -1);
 	return rvi->harts[hartid].xlen;
@@ -287,7 +256,7 @@ riscv_set_rtos_hartid(struct target *const target,
 {
 	LOG_DEBUG("%s: setting RTOS hartid %d",
 		target_name(target), hartid);
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	rvi->rtos_hartid = hartid;
 }
@@ -313,10 +282,42 @@ int
 riscv_get_register_on_hart(struct target *target, riscv_reg_t *value, int hartid, enum gdb_regno regid);
 /**@}*/
 
-enum riscv_halt_reason riscv_halt_reason(struct target *target, int hartid);
+void
+riscv_semihosting_init(struct target *target);
 
-void riscv_semihosting_init(struct target *target);
-int riscv_semihosting(struct target *target, int *p_error_code);
+int
+riscv_semihosting(struct target *target,
+	int *p_error_code);
 /**@}*/
+
+int
+riscv_write_debug_buffer(struct target *const target,
+	unsigned const index,
+	riscv_insn_t const data);
+
+riscv_insn_t
+riscv_read_debug_buffer(struct target *const target,
+	unsigned const index);
+
+int
+riscv_execute_debug_buffer(struct target *const target);
+
+int
+riscv_dmi_write_u64_bits(struct target *const target);
+
+void
+riscv_fill_dmi_write_u64(struct target *const target,
+	uint8_t *const buf/**<[out]*/,
+	int const a,
+	uint64_t const d);
+
+void
+riscv_fill_dmi_read_u64(struct target *const target,
+	uint8_t *const buf/**<[out]*/,
+	int a);
+
+void
+riscv_fill_dmi_nop_u64(struct target *const target,
+	uint8_t *const buf/**<[out]*/);
 
 #endif  /* TARGET_RISCV_RISCV_H_ */

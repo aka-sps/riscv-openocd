@@ -60,7 +60,7 @@ int riscv_update_threads(struct rtos *rtos)
 static inline void
 riscv_set_all_rtos_harts(struct target *const target)
 {
-	struct riscv_info_t *const rvi = riscv_info(target);
+	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	rvi->rtos_hartid = -1;
 }

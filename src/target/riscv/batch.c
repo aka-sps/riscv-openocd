@@ -79,37 +79,6 @@ riscv_batch_free(struct riscv_batch *const batch)
 	free(batch);
 }
 
-static inline int
-riscv_dmi_write_u64_bits(struct target *const target)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi && rvi->dmi_write_u64_bits);
-	return rvi->dmi_write_u64_bits(target);
-}
-
-static inline void
-riscv_fill_dmi_nop_u64(struct target *const target,
-	uint8_t *const buf)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi && rvi->fill_dmi_nop_u64);
-	rvi->fill_dmi_nop_u64(target, buf);
-}
-
-/**
-@todo check error code
-*/
-static inline void
-riscv_fill_dmi_write_u64(struct target *const target,
-	uint8_t *const buf,
-	int const a,
-	uint64_t const d)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi && rvi->fill_dmi_write_u64);
-	rvi->fill_dmi_write_u64(target, buf, a, d);
-}
-
 void
 riscv_batch_add_dmi_write(struct riscv_batch *const batch,
 	unsigned const address,
@@ -125,14 +94,6 @@ riscv_batch_add_dmi_write(struct riscv_batch *const batch,
 	riscv_fill_dmi_nop_u64(batch->target, field->in_value);
 	batch->last_scan = RISCV_SCAN_TYPE_WRITE;
 	++batch->used_scans;
-}
-
-static inline void
-riscv_fill_dmi_read_u64(struct target *const target, uint8_t *buf, int a)
-{
-	struct riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi && rvi->fill_dmi_read_u64);
-	rvi->fill_dmi_read_u64(target, buf, a);
 }
 
 uint64_t
