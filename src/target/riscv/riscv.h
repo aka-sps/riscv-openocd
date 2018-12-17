@@ -116,19 +116,7 @@ enum gdb_regno {
 	GDB_REGNO_COUNT
 };
 
-struct HART_register_s {
-#if 0
-	uint64_t saved;
-#endif
-	bool valid;
-};
-
 struct HART_s {
-	/* Enough space to store all the registers we might need to save. */
-	/**
-	@todo FIXME: This should probably be a bunch of register caches.
-	*/
-	struct HART_register_s registers[RISCV_MAX_REGISTERS];
 	/* It's possible that each core has a different supported ISA set. */
 	int xlen;
 	riscv_reg_t misa;
@@ -236,8 +224,9 @@ riscv_xlen_of_hart(struct target const *const target,
 {
 	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS);
-	assert(rvi->harts[hartid].xlen != -1);
-	return rvi->harts[hartid].xlen;
+	int const xlen = rvi->harts[hartid].xlen;
+	assert(0 <= xlen);
+	return xlen;
 }
 
 /** @returns XLEN for current hart. */

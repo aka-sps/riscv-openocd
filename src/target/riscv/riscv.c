@@ -4133,9 +4133,7 @@ write_memory_sba_simple(struct target *const target,
 			return (void)(error_code);
 	}
 
-	/*
-	Write SBDATA registers starting with highest address, since write to SBDATA0 triggers write
-	*/
+	/*Write SBDATA registers starting with highest address, since write to SBDATA0 triggers write */
 	for (int i = write_size - 1; i >= 0; --i) {
 		int const error_code = dmi_write(target, DMI_SBDATA0 + i, write_data[i]);
 
@@ -6345,9 +6343,6 @@ riscv_info_init(struct target *const target)
 
 	for (size_t hart = 0; hart < RISCV_MAX_HARTS; ++hart) {
 		r->harts[hart].xlen = -1;
-
-		for (size_t e = 0; e < RISCV_MAX_REGISTERS; ++e)
-			r->harts[hart].registers[e].valid = false;
 	}
 
 	return r;
