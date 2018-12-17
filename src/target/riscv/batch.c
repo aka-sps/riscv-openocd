@@ -1,9 +1,51 @@
 #include "batch.h"
 
+#include "target/target.h"
+
 #include "debug_defines.h"
 #include "riscv.h"
 
 #include "jtag/jtag.h"
+
+enum riscv_scan_type_e {
+	RISCV_SCAN_TYPE_INVALID,
+	RISCV_SCAN_TYPE_NOP,
+	RISCV_SCAN_TYPE_READ,
+	RISCV_SCAN_TYPE_WRITE,
+};
+
+/**	A batch of multiple JTAG scans,
+	which are grouped together to avoid the overhead of some JTAG adapters when sending single commands.
+	This is designed to support block copies, as that's what we actually need to go fast.
+*/
+struct riscv_batch {
+	struct target *target;
+
+	size_t allocated_scans;
+	size_t used_scans;
+
+	size_t idle_count;
+
+	uint8_t *data_out;
+	uint8_t *data_in;
+	struct scan_field *fields;
+
+	/** In JTAG we scan out the previous value's output when performing a
+	* scan.  This is a pain for users, so we just provide them the
+	* illusion of not having to do this by eliding all but the last NOP.
+	* */
+	enum riscv_scan_type_e last_scan;
+
+	/* The read keys. */
+	size_t *read_keys;
+	size_t read_keys_used;
+};
+
+bool
+riscv_batch_full(struct riscv_batch const *const batch)
+{
+	return batch->allocated_scans < batch->used_scans + 4;
+}
 
 static void
 riscv_batch_dump_field(struct scan_field const *const field)

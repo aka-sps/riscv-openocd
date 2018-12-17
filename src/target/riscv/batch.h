@@ -1,41 +1,12 @@
 #ifndef TARGET_RISCV_SCANS_H_
 #define TARGET_RISCV_SCANS_H_
 
-#include "target/target.h"
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-enum riscv_scan_type_e {
-	RISCV_SCAN_TYPE_INVALID,
-	RISCV_SCAN_TYPE_NOP,
-	RISCV_SCAN_TYPE_READ,
-	RISCV_SCAN_TYPE_WRITE,
-};
-
-/** A batch of multiple JTAG scans, which are grouped together to avoid the
- * overhead of some JTAG adapters when sending single commands.  This is
- * designed to support block copies, as that's what we actually need to go
- * fast. */
-struct riscv_batch {
-	struct target *target;
-
-	size_t allocated_scans;
-	size_t used_scans;
-
-	size_t idle_count;
-
-	uint8_t *data_out;
-	uint8_t *data_in;
-	struct scan_field *fields;
-
-	/** In JTAG we scan out the previous value's output when performing a
-	 * scan.  This is a pain for users, so we just provide them the
-	 * illusion of not having to do this by eliding all but the last NOP.
-	 * */
-	enum riscv_scan_type_e last_scan;
-
-	/* The read keys. */
-	size_t *read_keys;
-	size_t read_keys_used;
-};
+struct riscv_batch;
+struct target;
 
 /**	Allocates (or frees) a new scan set.
 
@@ -49,19 +20,16 @@ struct riscv_batch *
 void
 riscv_batch_free(struct riscv_batch *batch);
 
-/** Checks to see if this batch is full. */
-static inline bool
-riscv_batch_full(struct riscv_batch const *const batch)
-{
-	return batch->allocated_scans < batch->used_scans + 4;
-}
+/** @brief Checks to see if this batch is full. */
+bool
+riscv_batch_full(struct riscv_batch const *const batch);
 
-/** Executes this scan batch. */
+/** @brief Executes this scan batch. */
 int
 __attribute__((warn_unused_result))
 riscv_batch_run(struct riscv_batch *batch);
 
-/** Adds a DMI write to this batch. */
+/** @brief Adds a DMI write to this batch. */
 void
 riscv_batch_add_dmi_write(struct riscv_batch *batch,
 	unsigned address,
