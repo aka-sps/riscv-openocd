@@ -17,7 +17,6 @@
 #include "rtos/rtos.h"
 #include "rtos/riscv_debug.h"
 
-
 /** @file
  Since almost everything can be accomplish by scanning the dbus register, all
  functions here assume dbus is already selected. The exception are functions
@@ -64,21 +63,26 @@
 	to the target. Afterwards use cache_get... to read results.
 */
 
-#define DMI_DATA1 (DMI_DATA0 + 1)
-#define DMI_PROGBUF1 (DMI_PROGBUF0 + 1)
+#define DMI_DATA1		(DMI_DATA0 + 1)
+#define DMI_PROGBUF1	(DMI_PROGBUF0 + 1)
 
-#define CSR_DCSR_CAUSE_SWBP		1
-#define CSR_DCSR_CAUSE_TRIGGER	2
-#define CSR_DCSR_CAUSE_DEBUGINT	3
-#define CSR_DCSR_CAUSE_STEP		4
-#define CSR_DCSR_CAUSE_HALT		5
+#define CSR_DCSR_CAUSE_SWBP		(1)
+#define CSR_DCSR_CAUSE_TRIGGER	(2)
+#define CSR_DCSR_CAUSE_DEBUGINT	(3)
+#define CSR_DCSR_CAUSE_STEP		(4)
+#define CSR_DCSR_CAUSE_HALT		(5)
+
+#define RISCV_MAX_TRIGGERS		(32)
+
+/** Static array dimensions macro */
+#define DIM(x) (sizeof (x) / sizeof (x)[0])
 
 #define COMPLIANCE_TEST(b, message) \
 {                                   \
-	bool const pass = !!(b); \
-	if (pass) {		    \
-		++passed_tests;     \
-	}			    \
+	bool const pass = !!(b);        \
+	if (pass) {                     \
+		++passed_tests;             \
+	}                               \
 	LOG_INFO("%s test %d (%s)", pass ? "PASSED" : "FAILED",  ++total_tests, message); \
 }
 
@@ -90,9 +94,9 @@
 #define COMPLIANCE_CHECK_RO(target, addr)                               \
 {                                                                       \
 	uint32_t orig;                                                      \
-	uint32_t inverse;                                                   \
 	COMPLIANCE_READ(target, &orig, addr);                               \
 	COMPLIANCE_WRITE(target, addr, ~orig);                              \
+	uint32_t inverse;                                                   \
 	COMPLIANCE_READ(target, &inverse, addr);                            \
 	COMPLIANCE_TEST(orig == inverse, "Register must be read-only");     \
 }
@@ -1211,7 +1215,7 @@ examine_progbuf(struct target *const target)
 
 	struct riscv_program program;
 	riscv_program_init(&program, target);
-	riscv_program_insert(&program, auipc(S0));
+	riscv_program_insert(&program, auipc(GDB_REGNO_S0));
 
 	{
 		int const error_code = riscv_program_exec(&program, target);
@@ -1229,7 +1233,7 @@ examine_progbuf(struct target *const target)
 	}
 
 	riscv_program_init(&program, target);
-	riscv_program_insert(&program, sw(S0, S0, 0));
+	riscv_program_insert(&program, sw(GDB_REGNO_S0, GDB_REGNO_S0, 0));
 	int const result = riscv_program_exec(&program, target);
 
 	{
@@ -1631,7 +1635,7 @@ riscv_013_register_write_direct(struct target *const target,
 		/* There are no instructions to move all the bits from a register, so
 		* we need to use some scratch RAM. */
 		use_scratch = true;
-		riscv_program_insert(&program, fld(number - GDB_REGNO_FPR0, S0, 0));
+		riscv_program_insert(&program, fld(number - GDB_REGNO_FPR0, GDB_REGNO_S0, 0));
 
 		{
 			int const error_code = scratch_reserve(target, &scratch, &program, 8);
@@ -1668,17 +1672,17 @@ riscv_013_register_write_direct(struct target *const target,
 
 		if (GDB_REGNO_FPR0 <= number && number <= GDB_REGNO_FPR31) {
 			if (riscv_supports_extension(target, riscv_current_hartid(target), 'D')) {
-				int const error_code = riscv_program_insert(&program, fmv_d_x(number - GDB_REGNO_FPR0, S0));
+				int const error_code = riscv_program_insert(&program, fmv_d_x(number - GDB_REGNO_FPR0, GDB_REGNO_S0));
 
 				if (ERROR_OK != error_code)
 					return error_code;
 			} else {
-				int const error_code = riscv_program_insert(&program, fmv_w_x(number - GDB_REGNO_FPR0, S0));
+				int const error_code = riscv_program_insert(&program, fmv_w_x(number - GDB_REGNO_FPR0, GDB_REGNO_S0));
 				if (ERROR_OK != error_code)
 					return error_code;
 			}
 		} else if (GDB_REGNO_CSR0 <= number && number <= GDB_REGNO_CSR4095) {
-			int const error_code = riscv_program_csrw(&program, S0, number);
+			int const error_code = riscv_program_csrw(&program, GDB_REGNO_S0, number);
 
 			if (ERROR_OK != error_code) {
 				LOG_ERROR("%s: csr%d write error=%d",
@@ -1810,7 +1814,7 @@ riscv_013_register_read_direct(struct target *const target,
 				riscv_xlen(target) < 64) {
 				/* There are no instructions to move all the bits from a
 				* register, so we need to use some scratch RAM. */
-				(void)(riscv_program_insert(&program, fsd(number - GDB_REGNO_FPR0, S0, 0)));
+				(void)(riscv_program_insert(&program, fsd(number - GDB_REGNO_FPR0, GDB_REGNO_S0, 0)));
 
 				if (ERROR_OK != scratch_reserve(target, &scratch, &program, 8))
 					return result;
@@ -1822,12 +1826,12 @@ riscv_013_register_read_direct(struct target *const target,
 					return result;
 				}
 			} else if (riscv_supports_extension(target, riscv_current_hartid(target), 'D')) {
-				(void)(riscv_program_insert(&program, fmv_x_d(S0, number - GDB_REGNO_FPR0)));
+				(void)(riscv_program_insert(&program, fmv_x_d(GDB_REGNO_S0, number - GDB_REGNO_FPR0)));
 			} else {
-				(void)(riscv_program_insert(&program, fmv_x_w(S0, number - GDB_REGNO_FPR0)));
+				(void)(riscv_program_insert(&program, fmv_x_w(GDB_REGNO_S0, number - GDB_REGNO_FPR0)));
 			}
 		} else if (GDB_REGNO_CSR0 <= number && number <= GDB_REGNO_CSR4095) {
-			if (ERROR_OK != (result = riscv_program_csrr(&program, S0, number)))
+			if (ERROR_OK != (result = riscv_program_csrr(&program, GDB_REGNO_S0, number)))
 				return result;
 		} else {
 			LOG_ERROR("%s: Unsupported register (enum gdb_regno)(%u)",
@@ -3647,11 +3651,11 @@ riscv_013_write_memory(struct target *const target,
 	if (info->progbufsize >= 2 && !riscv_prefer_sba)
 		return write_memory_progbuf(target, address, size, count, buffer);
 
-	if ((get_field(info->sbcs, DMI_SBCS_SBACCESS8) && size == 1) ||
-		(get_field(info->sbcs, DMI_SBCS_SBACCESS16) && size == 2) ||
-		(get_field(info->sbcs, DMI_SBCS_SBACCESS32) && size == 4) ||
-		(get_field(info->sbcs, DMI_SBCS_SBACCESS64) && size == 8) ||
-		(get_field(info->sbcs, DMI_SBCS_SBACCESS128) && size == 16)
+	if ((0 != get_field(info->sbcs, DMI_SBCS_SBACCESS8) && 1 == size) ||
+		(0 != get_field(info->sbcs, DMI_SBCS_SBACCESS16) && 2 == size) ||
+		(0 != get_field(info->sbcs, DMI_SBCS_SBACCESS32) && 4 == size) ||
+		(0 != get_field(info->sbcs, DMI_SBCS_SBACCESS64) && 8 == size) ||
+		(0 != get_field(info->sbcs, DMI_SBCS_SBACCESS128) && 16 == size)
 		) {
 		switch (get_field(info->sbcs, DMI_SBCS_SBVERSION)) {
 		case 0:
@@ -3665,7 +3669,7 @@ riscv_013_write_memory(struct target *const target,
 		}
 	}
 
-	if (info->progbufsize >= 2)
+	if (2 <= info->progbufsize)
 		return write_memory_progbuf(target, address, size, count, buffer);
 
 	LOG_ERROR("%s: Don't know how to write memory on this target.", target_name(target));
@@ -3673,7 +3677,7 @@ riscv_013_write_memory(struct target *const target,
 }
 
 static char const *
-gdb_regno_name(enum gdb_regno const regno)
+gdb_regno_name(enum gdb_riscv_regno const regno)
 {
 	switch (regno) {
 	case GDB_REGNO_ZERO:
@@ -3822,7 +3826,7 @@ riscv_013_set_register(struct target *const target, int hid, int rid, uint64_t v
 static int
 riscv_set_register_on_hart(struct target *const target,
 	int const hartid,
-	enum gdb_regno const regid,
+	enum gdb_riscv_regno const regid,
 	uint64_t const value)
 {
 	LOG_DEBUG("%s: [%d] %s <- %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), value);
@@ -3975,7 +3979,7 @@ riscv_013_halt_reason(struct target *const target)
 int
 riscv_write_debug_buffer(struct target *const target,
 	unsigned const index,
-	riscv_insn_t const data)
+	uint32_t const data)
 {
 	return dmi_write(target, DMI_PROGBUF0 + index, data);
 }
@@ -3983,7 +3987,7 @@ riscv_write_debug_buffer(struct target *const target,
 /**
 @bug non handled errors, possible invalid result
 */
-riscv_insn_t
+uint32_t
 riscv_read_debug_buffer(struct target *const target,
 	unsigned const index)
 {
@@ -8043,7 +8047,7 @@ riscv_count_harts(struct target const *const target)
  */
 int
 riscv_set_register(struct target *const target,
-	enum gdb_regno const gdb_reg_no,
+	enum gdb_riscv_regno const gdb_reg_no,
 	riscv_reg_t const value)
 {
 	return riscv_set_register_on_hart(target, riscv_current_hartid(target), gdb_reg_no, value);
@@ -8055,7 +8059,7 @@ riscv_set_register(struct target *const target,
 int
 riscv_get_register(struct target *const target,
 	riscv_reg_t *const value,
-	enum gdb_regno const r)
+	enum gdb_riscv_regno const r)
 {
 	return
 		riscv_get_register_on_hart(target, value, riscv_current_hartid(target), r);
@@ -8066,7 +8070,7 @@ int
 riscv_get_register_on_hart(struct target *const target,
 	riscv_reg_t *const value/**<[out]*/,
 	int const hartid,
-	enum gdb_regno const regid)
+	enum gdb_riscv_regno const regid)
 {
 	if (riscv_current_hartid(target) != hartid)
 		riscv_invalidate_register_cache(target);

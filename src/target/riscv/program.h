@@ -1,15 +1,22 @@
 #ifndef TARGET_RISCV_PROGRAM_H_
 #define TARGET_RISCV_PROGRAM_H_
 
-#include "riscv.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-#define RISCV_MAX_DEBUG_BUFFER_SIZE 32
-#define RISCV_REGISTER_COUNT 32
-#define RISCV_DSCRATCH_COUNT 2
+#define RISCV_MAX_DEBUG_BUFFER_SIZE	(32)
+#define RISCV_REGISTER_COUNT		(32)
+#define RISCV_DSCRATCH_COUNT		(2)
 
-/* The various RISC-V debug specifications all revolve around setting up
- * program buffers and executing them on the target.  This structure contains a
- * single program, which can then be executed on targets.  */
+enum gdb_riscv_regno;
+struct target;
+
+/**	The various RISC-V debug specifications all revolve around setting up
+	program buffers and executing them on the target.
+
+	This structure contains a single program, which can then be executed on targets.
+*/
 struct riscv_program {
 	struct target *target;
 
@@ -26,50 +33,99 @@ struct riscv_program {
 	int target_xlen;
 };
 
-/* Initializes a program with the header. */
-void riscv_program_init(struct riscv_program *p, struct target *t);
+/** Initializes a program with the header. */
+void
+riscv_program_init(struct riscv_program *p, struct target *t);
 
-/* Write the program to the program buffer. */
-int riscv_program_write(struct riscv_program *program);
+/** Write the program to the program buffer. */
+int
+riscv_program_write(struct riscv_program *program);
 
-/* Executes a program, returning 0 if the program successfully executed.  Note
- * that this may cause registers to be saved or restored, which could result to
- * calls to things like riscv_save_register which itself could require a
- * program to execute.  That's OK, just make sure this eventually terminates.
- * */
-int riscv_program_exec(struct riscv_program *p, struct target *t);
+/**	Executes a program, returning 0 if the program successfully executed.
+
+	Note that this may cause registers to be saved or restored,
+	which could result to calls to things like riscv_save_register
+	which itself could require a program to execute.
+	
+	That's OK, just make sure this eventually terminates.
+*/
+int
+riscv_program_exec(struct riscv_program *p,
+	struct target *t);
+
+#if 0
 int riscv_program_load(struct riscv_program *p, struct target *t);
 
 /* Clears a program, removing all the state associated with it. */
 int riscv_program_clear(struct riscv_program *p, struct target *t);
+#endif
 
-/* A lower level interface, you shouldn't use this unless you have a reason. */
-int riscv_program_insert(struct riscv_program *p, riscv_insn_t i);
+/** A lower level interface, you shouldn't use this unless you have a reason. */
+int
+riscv_program_insert(struct riscv_program *p,
+	uint32_t i);
 
-/* There is hardware support for saving at least one register.  This register
- * doesn't need to be saved/restored the usual way, which is useful during
- * early initialization when we can't save/restore arbitrary registerrs to host
- * memory. */
-int riscv_program_save_to_dscratch(struct riscv_program *p, enum gdb_regno to_save);
+#if 0
+/**	There is hardware support for saving at least one register.
+	
+	This register doesn't need to be saved/restored the usual way,
+	which is useful during early initialization when we can't
+	save/restore arbitrary registers to host memory.
+*/
+int riscv_program_save_to_dscratch(struct riscv_program *p, enum gdb_riscv_regno to_save);
 
-/* Helpers to assemble various instructions.  Return 0 on success.  These might
- * assemble into a multi-instruction sequence that overwrites some other
- * register, but those will be properly saved and restored. */
-int riscv_program_lwr(struct riscv_program *p, enum gdb_regno d, enum gdb_regno a, int o);
-int riscv_program_lhr(struct riscv_program *p, enum gdb_regno d, enum gdb_regno a, int o);
-int riscv_program_lbr(struct riscv_program *p, enum gdb_regno d, enum gdb_regno a, int o);
+#endif
 
-int riscv_program_swr(struct riscv_program *p, enum gdb_regno s, enum gdb_regno a, int o);
-int riscv_program_shr(struct riscv_program *p, enum gdb_regno s, enum gdb_regno a, int o);
-int riscv_program_sbr(struct riscv_program *p, enum gdb_regno s, enum gdb_regno a, int o);
+/** @name Helpers to assemble various instructions.
 
-int riscv_program_csrr(struct riscv_program *p, enum gdb_regno d, enum gdb_regno csr);
-int riscv_program_csrw(struct riscv_program *p, enum gdb_regno s, enum gdb_regno csr);
+	@return 0 on success.
+	
+	These might assemble into a multi-instruction sequence that overwrites some other register,
+	but those will be properly saved and restored.
+*/
+/**@{*/
+int
+riscv_program_lwr(struct riscv_program *p,
+	enum gdb_riscv_regno d,
+	enum gdb_riscv_regno a,
+	int o);
+
+int
+riscv_program_lhr(struct riscv_program *p,
+	enum gdb_riscv_regno d,
+	enum gdb_riscv_regno a,
+	int o);
+
+int
+riscv_program_lbr(struct riscv_program *p,
+	enum gdb_riscv_regno d,
+	enum gdb_riscv_regno a,
+	int o);
+
+int
+riscv_program_swr(struct riscv_program *p,
+	enum gdb_riscv_regno s,
+	enum gdb_riscv_regno a,
+	int o);
+
+int
+riscv_program_shr(struct riscv_program *p,
+	enum gdb_riscv_regno s,
+	enum gdb_riscv_regno a,
+	int o);
+int riscv_program_sbr(struct riscv_program *p, enum gdb_riscv_regno s, enum gdb_riscv_regno a, int o);
+
+int riscv_program_csrr(struct riscv_program *p, enum gdb_riscv_regno d, enum gdb_riscv_regno csr);
+int riscv_program_csrw(struct riscv_program *p, enum gdb_riscv_regno s, enum gdb_riscv_regno csr);
 
 int riscv_program_fence_i(struct riscv_program *p);
 int riscv_program_fence(struct riscv_program *p);
 int riscv_program_ebreak(struct riscv_program *p);
 
-int riscv_program_addi(struct riscv_program *p, enum gdb_regno d, enum gdb_regno s, int16_t i);
+int riscv_program_addi(struct riscv_program *p,
+	enum gdb_riscv_regno d,
+	enum gdb_riscv_regno s,
+	int16_t i);
+/**@}*/
 
 #endif  /* TARGET_RISCV_PROGRAM_H_ */

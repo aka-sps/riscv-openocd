@@ -1,11 +1,12 @@
 #ifndef TARGET_RISCV_DEBUG_DEFINES_H_
 #define TARGET_RISCV_DEBUG_DEFINES_H_
 
-#define DTM_IDCODE                          (0x01)
+#include <stdint.h>
 
 #if 0
 /** @name Identifies the release version of this part.*/
 /**@{*/
+#define DTM_IDCODE                          (0x01)
 #define DTM_IDCODE_VERSION_OFFSET           (28)
 #if 0
 #define DTM_IDCODE_VERSION_LENGTH           (4)

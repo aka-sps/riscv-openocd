@@ -13,25 +13,21 @@
 #define set_field(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
 /**@}*/
 
-/** Static array dimensions macro */
-#define DIM(x) (sizeof (x) / sizeof (x)[0])
-
 /* The register cache is statically allocated. */
 #define RISCV_MAX_HARTS		(32)
 #define RISCV_MAX_REGISTERS	(5000)
-#define RISCV_MAX_TRIGGERS	(32)
 #define RISCV_MAX_HWBPS		(16)
 
 /** Definitions shared by code supporting all RISC-V versions. */
 /**@{*/
 typedef uint64_t riscv_reg_t;
-typedef uint32_t riscv_insn_t;
+typedef uint32_t uint32_t;
 typedef uint64_t riscv_addr_t;
 /**@}*/
 
 /** gdb's register list is defined in riscv_gdb_reg_names gdb/riscv-tdep.c in
 * its source tree. We must interpret the numbers the same here. */
-enum gdb_regno {
+enum gdb_riscv_regno {
 	GDB_REGNO_ZERO = 0,        /* Read-only register, always 0.  */
 	GDB_REGNO_RA = 1,          /* Return Address.  */
 	GDB_REGNO_SP = 2,          /* Stack Pointer.  */
@@ -262,13 +258,13 @@ riscv_count_harts(struct target const *target);
  * are zero extended to 64 bits.  */
  /**@{*/
 int
-riscv_set_register(struct target *target, enum gdb_regno i, riscv_reg_t v);
+riscv_set_register(struct target *target, enum gdb_riscv_regno i, riscv_reg_t v);
 
 int
-riscv_get_register(struct target *target, riscv_reg_t *value, enum gdb_regno r);
+riscv_get_register(struct target *target, riscv_reg_t *value, enum gdb_riscv_regno r);
 
 int
-riscv_get_register_on_hart(struct target *target, riscv_reg_t *value, int hartid, enum gdb_regno regid);
+riscv_get_register_on_hart(struct target *target, riscv_reg_t *value, int hartid, enum gdb_riscv_regno regid);
 /**@}*/
 
 void
@@ -282,9 +278,9 @@ riscv_semihosting(struct target *target,
 int
 riscv_write_debug_buffer(struct target *const target,
 	unsigned const index,
-	riscv_insn_t const data);
+	uint32_t const data);
 
-riscv_insn_t
+uint32_t
 riscv_read_debug_buffer(struct target *const target,
 	unsigned const index);
 

@@ -3,14 +3,7 @@
 
 #include "encoding.h"
 #include <stdint.h>
-
-/** @name Register numbers */
-/**@{*/
-#define ZERO	0
-#define T0      5
-#define S0      8
-#define S1      9
-/**@}*/
+#include <assert.h>
 
 static inline uint32_t
 bits(uint32_t const value,
