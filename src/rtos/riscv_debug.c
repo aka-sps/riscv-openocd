@@ -54,17 +54,6 @@ int riscv_update_threads(struct rtos *rtos)
 	return JIM_OK;
 }
 
-/** When using the RTOS to debug, this selects the hart that is currently being
-* debugged.  This doesn't propogate to the hardware. */
-/**@{*/
-static inline void
-riscv_set_all_rtos_harts(struct target *const target)
-{
-	riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-	rvi->rtos_hartid = -1;
-}
-
 static int riscv_gdb_thread_packet(struct connection *connection, const char *packet, int packet_size)
 {
 	struct target *target = get_target_from_connection(connection);

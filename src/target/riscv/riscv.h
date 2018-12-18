@@ -244,6 +244,18 @@ riscv_set_rtos_hartid(struct target *const target,
 	rvi->rtos_hartid = hartid;
 }
 
+/** When using the RTOS to debug, this selects the hart that is currently being debugged.
+
+This doesn't propagate to the hardware.
+*/
+static inline void
+riscv_set_all_rtos_harts(struct target *const target)
+{
+	riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	rvi->rtos_hartid = -1;
+}
+
 /**@}*/
 
 /** Lists the number of harts in the system,
