@@ -42,16 +42,6 @@ riscv_program_write(struct riscv_program *const program)
 	return ERROR_OK;
 }
 
-static size_t
-riscv_debug_buffer_size(struct target *const target)
-{
-	riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-	int const hart = riscv_current_hartid(target);
-	assert(0<= hart && hart < RISCV_MAX_HARTS);
-	return rvi->harts[hart].debug_buffer_size;
-}
-
 /** Add ebreak and execute the program. */
 int
 riscv_program_exec(struct riscv_program *const p,
@@ -182,13 +172,11 @@ riscv_program_ebreak(struct riscv_program *const p)
 {
 	assert(p);
 	struct target *const target = p->target;
-	riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
 
-	if (riscv_debug_buffer_size(p->target) == p->instruction_count && rvi->impebreak)
-		return ERROR_OK;
-
-	return riscv_program_insert(p, ebreak());
+	return
+		riscv_debug_buffer_size(target) == p->instruction_count && riscv_is_impebreak(target) ?
+		ERROR_OK :
+		riscv_program_insert(p, ebreak());
 }
 
 int

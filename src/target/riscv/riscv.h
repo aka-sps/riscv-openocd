@@ -112,84 +112,6 @@ enum gdb_riscv_regno {
 	GDB_REGNO_COUNT
 };
 
-struct HART_s {
-	/* It's possible that each core has a different supported ISA set. */
-	int xlen;
-	riscv_reg_t misa;
-
-	/* The number of triggers per hart. */
-	unsigned trigger_count;
-
-	/* The number of entries in the debug buffer. */
-	int debug_buffer_size;
-};
-
-struct riscv_info_s {
-	unsigned dtm_version;
-
-	struct command_context *cmd_ctx;
-	void *version_specific;
-
-	/* The number of harts on this system. */
-	int hart_count;
-
-	/* The hart that the RTOS thinks is currently being debugged. */
-	int rtos_hartid;
-
-	/* The hart that is currently being debugged.  Note that this is
-	 * different than the hartid that the RTOS is expected to use.  This
-	 * one will change all the time, it's more of a global argument to
-	 * every function than an actual */
-	int current_hartid;
-
-	/** OpenOCD's register cache points into here.
-
-	This is not per-hart because we just invalidate
-	the entire cache when we change which hart is selected.
-
-	@bug Use target cache instead 
-	*/
-	uint64_t reg_cache_values[RISCV_MAX_REGISTERS];
-
-	/* Single buffer that contains all register names, instead of calling
-	malloc for each register. Needs to be freed when reg_list is freed.
-
-	@bug Use target cache instead
-	*/
-	char *reg_names;
-
-	/**
-	@bug Bad design - non-local hart information! Problem with JRC!
-	*/
-	struct HART_s harts[RISCV_MAX_HARTS];
-
-	/** For each physical trigger, contains -1 if the hwbp is available, or the
-	unique_id of the breakpoint/watchpoint that is using it.
-
-	@note Note that in RTOS mode the triggers are the same across all harts the
-	target controls, while otherwise only a single hart is controlled.
-	*/
-	int trigger_unique_id[RISCV_MAX_HWBPS];
-
-	/* This avoids invalidating the register cache too often. */
-	bool registers_initialized;
-
-	/** This hart contains an implicit ebreak at the end of the program buffer. */
-	bool impebreak;
-
-	bool triggers_enumerated;
-};
-typedef struct riscv_info_s riscv_info_t;
-
-/** Everything needs the RISC-V specific info structure, so here's a nice macro that provides that. */
-static inline riscv_info_t *
-__attribute__((warn_unused_result, pure))
-riscv_info(struct target const *const target)
-{
-	assert(target);
-	return target->arch_info;
-}
-
 /** RISC-V Interface */
 /**@{*/
 
@@ -201,27 +123,15 @@ riscv_step_rtos_hart(struct target *target);
 /**	Sets the current hart,
 	which is the hart that will actually be used when issuing debug commands.
 */
-static inline int
+int
 __attribute__((warn_unused_result, pure))
-riscv_current_hartid(struct target const *const target)
-{
-	riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi);
-	return rvi->current_hartid;
-}
+riscv_current_hartid(struct target const *const target);
 
 /** @returns XLEN for the given (or current) hart. */
-static inline int
+int
 __attribute__((pure))
 riscv_xlen_of_hart(struct target const *const target,
-	int const hartid)
-{
-	riscv_info_t const *const rvi = riscv_info(target);
-	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS);
-	int const xlen = rvi->harts[hartid].xlen;
-	assert(0 <= xlen);
-	return xlen;
-}
+	int const hartid);
 
 /** @returns XLEN for current hart. */
 static inline int
@@ -233,28 +143,24 @@ riscv_xlen(struct target const *const target)
 /** Support functions for the RISC-V 'RTOS',
 	which provides multi-hart support without requiring multiple targets.
 */
-static inline void
+void
 riscv_set_rtos_hartid(struct target *const target,
-	int const hartid)
-{
-	LOG_DEBUG("%s: setting RTOS hartid %d",
-		target_name(target), hartid);
-	riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-	rvi->rtos_hartid = hartid;
-}
+	int const hartid);
 
 /** When using the RTOS to debug, this selects the hart that is currently being debugged.
 
 This doesn't propagate to the hardware.
 */
-static inline void
-riscv_set_all_rtos_harts(struct target *const target)
-{
-	riscv_info_t *const rvi = riscv_info(target);
-	assert(rvi);
-	rvi->rtos_hartid = -1;
-}
+void
+riscv_set_all_rtos_harts(struct target const *const target);
+
+bool
+__attribute__((pure))
+riscv_is_impebreak(struct target const *const target);
+
+size_t
+__attribute__((pure))
+riscv_debug_buffer_size(struct target *const target);
 
 /**@}*/
 
@@ -276,10 +182,15 @@ riscv_set_register(struct target *target,
 	riscv_reg_t v);
 
 int
-riscv_get_register(struct target *target, riscv_reg_t *value, enum gdb_riscv_regno r);
+riscv_get_register(struct target *target,
+	riscv_reg_t *value,
+	enum gdb_riscv_regno r);
 
 int
-riscv_get_register_on_hart(struct target *target, riscv_reg_t *value, int hartid, enum gdb_riscv_regno regid);
+riscv_get_register_on_hart(struct target *target,
+	riscv_reg_t *value,
+	int hartid,
+	enum gdb_riscv_regno regid);
 /**@}*/
 
 void

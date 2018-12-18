@@ -111,16 +111,74 @@
 #define DEFAULT_COMMAND_TIMEOUT_SEC		(2)
 #define DEFAULT_RESET_TIMEOUT_SEC		(30)
 
-/** @name External handlers
+struct HART_s {
+	/* It's possible that each core has a different supported ISA set. */
+	int xlen;
+	riscv_reg_t misa;
 
-	@todo place in header
-*/
-/**@{*/
-__COMMAND_HANDLER(handle_common_semihosting_command);
-__COMMAND_HANDLER(handle_common_semihosting_fileio_command);
-__COMMAND_HANDLER(handle_common_semihosting_resumable_exit_command);
-__COMMAND_HANDLER(handle_common_semihosting_cmdline);
-/**@}*/
+	/* The number of triggers per hart. */
+	unsigned trigger_count;
+
+	/* The number of entries in the debug buffer. */
+	int debug_buffer_size;
+};
+
+struct riscv_info_s {
+	unsigned dtm_version;
+
+	struct command_context *cmd_ctx;
+	void *version_specific;
+
+	/* The number of harts on this system. */
+	int hart_count;
+
+	/* The hart that the RTOS thinks is currently being debugged. */
+	int rtos_hartid;
+
+	/* The hart that is currently being debugged.  Note that this is
+	* different than the hartid that the RTOS is expected to use.  This
+	* one will change all the time, it's more of a global argument to
+	* every function than an actual */
+	int current_hartid;
+
+	/** OpenOCD's register cache points into here.
+
+	This is not per-hart because we just invalidate
+	the entire cache when we change which hart is selected.
+
+	@bug Use target cache instead
+	*/
+	uint64_t reg_cache_values[RISCV_MAX_REGISTERS];
+
+	/* Single buffer that contains all register names, instead of calling
+	malloc for each register. Needs to be freed when reg_list is freed.
+
+	@bug Use target cache instead
+	*/
+	char *reg_names;
+
+	/**
+	@bug Bad design - non-local hart information! Problem with JRC!
+	*/
+	struct HART_s harts[RISCV_MAX_HARTS];
+
+	/** For each physical trigger, contains -1 if the hwbp is available, or the
+	unique_id of the breakpoint/watchpoint that is using it.
+
+	@note Note that in RTOS mode the triggers are the same across all harts the
+	target controls, while otherwise only a single hart is controlled.
+	*/
+	int trigger_unique_id[RISCV_MAX_HWBPS];
+
+	/* This avoids invalidating the register cache too often. */
+	bool registers_initialized;
+
+	/** This hart contains an implicit ebreak at the end of the program buffer. */
+	bool impebreak;
+
+	bool triggers_enumerated;
+};
+typedef struct riscv_info_s riscv_info_t;
 
 enum dmi_op_e {
 	DMI_OP_NOP = 0,
@@ -196,10 +254,10 @@ struct riscv_013_info_s {
 	unsigned abits;
 
 	/** Number of abstract command data registers. */
-	unsigned datacount;
+	size_t datacount;
 
 	/** Number of words in the Program Buffer. */
-	unsigned progbufsize;
+	size_t progbufsize;
 
 	/** We cache the read-only bits of sbcs here. */
 	uint32_t sbcs;
@@ -391,6 +449,82 @@ range_t *expose_csr = NULL;
 /** In addition to the ones in the standard spec, we'll also expose additional custom registers. */
 range_t *expose_custom = NULL;
 
+/** @name External handlers
+
+@todo place in header
+*/
+/**@{*/
+__COMMAND_HANDLER(handle_common_semihosting_command);
+__COMMAND_HANDLER(handle_common_semihosting_fileio_command);
+__COMMAND_HANDLER(handle_common_semihosting_resumable_exit_command);
+__COMMAND_HANDLER(handle_common_semihosting_cmdline);
+/**@}*/
+
+/** Everything needs the RISC-V specific info structure, so here's a nice macro that provides that. */
+static inline riscv_info_t *
+__attribute__((warn_unused_result, pure))
+riscv_info(struct target const *const target)
+{
+	assert(target);
+	return target->arch_info;
+}
+
+int
+riscv_current_hartid(struct target const *const target)
+{
+	riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi);
+	return rvi->current_hartid;
+}
+
+int
+riscv_xlen_of_hart(struct target const *const target,
+	int const hartid)
+{
+	riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi && 0 <= hartid && hartid < RISCV_MAX_HARTS);
+	int const xlen = rvi->harts[hartid].xlen;
+	assert(0 <= xlen);
+	return xlen;
+}
+
+void
+riscv_set_rtos_hartid(struct target *const target,
+	int const hartid)
+{
+	LOG_DEBUG("%s: setting RTOS hartid %d",
+		target_name(target), hartid);
+	riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	rvi->rtos_hartid = hartid;
+}
+
+void
+riscv_set_all_rtos_harts(struct target const *const target)
+{
+	riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	rvi->rtos_hartid = -1;
+}
+
+bool
+riscv_is_impebreak(struct target const *const target)
+{
+	riscv_info_t *const rvi = riscv_info(target);
+	assert(rvi);
+	return rvi->impebreak;
+}
+
+size_t
+riscv_debug_buffer_size(struct target *const target)
+{
+	riscv_info_t const *const rvi = riscv_info(target);
+	assert(rvi);
+	int const hart = riscv_current_hartid(target);
+	assert(0 <= hart && hart < RISCV_MAX_HARTS);
+	return rvi->harts[hart].debug_buffer_size;
+}
+
 static void
 decode_dmi(char buffer[DUMP_FIELD_BUFFER_SIZE]/**<[out]*/,
 	unsigned const address/**<[in]*/,
@@ -496,9 +630,12 @@ dmi_scan(struct target *const target,
 	riscv_013_info_t *const info = get_info(target);
 
 	assert(info);
-	assert(info->abits != 0);
+	assert(0 != info->abits);
 
-	uint8_t out_buffer[8];
+	/**
+		@todo Check number of bits
+	*/
+	uint8_t out_buffer[8] = {};
 	buf_set_u32(out_buffer, DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH, op);
 	buf_set_u32(out_buffer, DTM_DMI_DATA_OFFSET, DTM_DMI_DATA_LENGTH, data_out);
 	buf_set_u32(out_buffer, DTM_DMI_ADDRESS_OFFSET, info->abits, address_out);
@@ -1601,7 +1738,9 @@ riscv_013_register_write_direct(struct target *const target,
 	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
-	if (ERROR_OK == result || info->progbufsize + rvi->impebreak < 2 || !riscv_is_halted(target))
+	if (ERROR_OK == result ||
+		info->progbufsize + !!riscv_is_impebreak(target) < 2 ||
+		!riscv_is_halted(target))
 		return result;
 
 	struct riscv_program program;
@@ -1771,7 +1910,11 @@ riscv_013_register_read_direct(struct target *const target,
 	riscv_info_t const *const rvi = riscv_info(target);
 	assert(rvi);
 
-	if (ERROR_OK != result && 2 <= info->progbufsize + rvi->impebreak && GDB_REGNO_XPR31 < number) {
+	if (
+		ERROR_OK != result &&
+		2 <= info->progbufsize + !!riscv_is_impebreak(target) &&
+		GDB_REGNO_XPR31 < number
+		) {
 		struct riscv_program program;
 		riscv_program_init(&program, target);
 
@@ -3121,7 +3264,7 @@ riscv_013_read_memory(struct target *const target,
 	riscv_013_info_t *const info = get_info(target);
 	assert(info);
 
-	if (info->progbufsize >= 2 && !riscv_prefer_sba)
+	if (2 <= info->progbufsize && !riscv_prefer_sba)
 		return read_memory_progbuf(target, address, size, count, buffer);
 
 	if ((FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS8) && size == 1) ||
@@ -3637,7 +3780,7 @@ riscv_013_write_memory(struct target *const target,
 {
 	riscv_013_info_t *const info = get_info(target);
 
-	if (info->progbufsize >= 2 && !riscv_prefer_sba)
+	if (2 <= info->progbufsize && !riscv_prefer_sba)
 		return write_memory_progbuf(target, address, size, count, buffer);
 
 	if ((0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS8) && 1 == size) ||
@@ -4050,8 +4193,6 @@ __attribute__((pure))
 get_max_sbaccess(struct target *const target)
 {
 	riscv_013_info_t const *const info = get_info(target);
-
-	bool const sbaccess8 = ;
 
 	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS128))
 		return 4;
@@ -4592,7 +4733,7 @@ maybe_execute_fence_i(struct target *const target)
 	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 
-	if (info->progbufsize + rvi->impebreak >= 3)
+	if (3 <= info->progbufsize + riscv_is_impebreak(target))
 		return execute_fence(target);
 
 	return ERROR_OK;
@@ -4919,7 +5060,7 @@ riscv_013_test_compliance(struct target *const target)
 			riscv_reg_t testval, testval_read;
 			/* Because DSCRATCH is not guaranteed to last across PB executions, need to put
 			this all into one PB execution. Which may not be possible on all implementations.*/
-			if (info->progbufsize >= 5) {
+			if (5 <= info->progbufsize) {
 				for (testval = 0x0011223300112233;
 					testval != 0xDEAD;
 					testval = testval == 0x0011223300112233 ? ~testval : 0xDEAD) {
@@ -5109,7 +5250,7 @@ riscv_013_test_compliance(struct target *const target)
 	if (abstractauto > 0) {
 		/* This mechanism only works when you have a reasonable sized progbuf, which is not
 		a true compliance requirement. */
-		if (info->progbufsize >= 3) {
+		if (3 <= info->progbufsize) {
 
 			testvar = 0;
 			COMPLIANCE_TEST(ERROR_OK == riscv_013_register_write_direct(target, GDB_REGNO_S0, 0),
@@ -5324,6 +5465,52 @@ cmp_csr_info(void const *p1, void const *p2)
 		(int)(pp1->number) -
 		(int)(pp2->number);
 }
+
+/** @return error code*/
+static int
+register_get(struct reg *const reg)
+{
+	assert(reg);
+	riscv_reg_info_t *const reg_info = reg->arch_info;
+	assert(reg_info);
+	struct target *const target = reg_info->target;
+	uint64_t value;
+	{
+		int const error_code = riscv_get_register(target, &value, reg->number);
+
+		if (ERROR_OK != error_code)
+			return error_code;
+	}
+
+	buf_set_u64(reg->value, 0, reg->size, value);
+	return ERROR_OK;
+}
+
+/** @return error code*/
+static int
+register_set(struct reg *const reg,
+	uint8_t *const buf)
+{
+	assert(reg);
+	assert(buf);
+	uint64_t const value = buf_get_u64(buf, 0, reg->size);
+
+	riscv_reg_info_t *const reg_info = reg->arch_info;
+	struct target *const target = reg_info->target;
+	assert(target);
+	LOG_DEBUG("%s: write 0x%" PRIx64 " to %s", target_name(target), value, reg->name);
+	struct reg *r = &target->reg_cache->reg_list[reg->number];
+	assert(r);
+	r->valid = true;
+	assert(r->value);
+	memcpy(r->value, buf, (r->size + 7) / 8);
+	return riscv_set_register(target, reg->number, value);
+}
+
+static struct reg_arch_type const riscv_reg_arch_type = {
+	.get = register_get,
+	.set = register_set
+};
 
 /** @return error code*/
 static int
@@ -6090,17 +6277,18 @@ riscv_013_examine(struct target *const target)
 	info->datacount = FIELD_GET(abstractcs, DMI_ABSTRACTCS_DATACOUNT);
 	info->progbufsize = FIELD_GET(abstractcs, DMI_ABSTRACTCS_PROGBUFSIZE);
 
-	LOG_INFO("%s: datacount=%d progbufsize=%d", target_name(target), info->datacount, info->progbufsize);
+	LOG_INFO("%s: datacount=%" PRIdPTR " progbufsize=%" PRIdPTR,
+		target_name(target), info->datacount, info->progbufsize);
 
 	riscv_info_t *const rvi = riscv_info(target);
 	assert(rvi);
 	rvi->impebreak = FIELD_GET(dmstatus, DMI_DMSTATUS_IMPEBREAK);
 
-	if (info->progbufsize + rvi->impebreak < 2) {
+	if (info->progbufsize + !!riscv_is_impebreak(target) < 2) {
 		LOG_WARNING("%s: We won't be able to execute fence instructions on this "
 			"target. Memory may not always appear consistent. "
-			"(progbufsize=%d, impebreak=%d)",
-			target_name(target), info->progbufsize, rvi->impebreak);
+			"(progbufsize=%" PRIdPTR ", impebreak=%d)",
+			target_name(target), info->progbufsize, !!riscv_is_impebreak(target));
 	}
 
 	/* Before doing anything else we must first enumerate the harts. */
@@ -6290,7 +6478,7 @@ riscv_013_init_target(struct command_context *const cmd_ctx,
 	riscv_013_info_t *const info = get_info(target);
 	assert(info);
 
-	info->progbufsize = -1;
+	info->progbufsize = 0;
 	info->dmi_busy_delay = 0;
 	info->bus_master_read_delay = 0;
 	info->bus_master_write_delay = 0;
@@ -7944,18 +8132,20 @@ static struct command_registration const riscv_exec_command_handlers[] = {
 };
 
 /**
- * To be noted that RISC-V targets use the same semihosting commands as
- * ARM targets.
- *
- * The main reason is compatibility with existing tools. For example the
- * Eclipse OpenOCD/SEGGER J-Link/QEMU plug-ins have several widgets to
- * configure semihosting, which generate commands like `arm semihosting
- * enable`.
- * A secondary reason is the fact that the protocol used is exactly the
- * one specified by ARM. If RISC-V will ever define its own semihosting
- * protocol, then a command like `riscv semihosting enable` will make
- * sense, but for now all semihosting commands are prefixed with `arm`.
- */
+	@note To be noted that RISC-V targets use the same semihosting commands as
+	ARM targets.
+	
+	The main reason is compatibility with existing tools.
+	For example the Eclipse OpenOCD/SEGGER J-Link/QEMU plug-ins
+	have several widgets to configure semihosting,
+	which generate commands like `arm semihosting enable`.
+
+	A secondary reason is the fact that the protocol used is exactly the
+	one specified by ARM.
+	If RISC-V will ever define its own semihosting protocol,
+	then a command like `riscv semihosting enable` will make sense,
+	but for now all semihosting commands are prefixed with `arm`.
+*/
 static struct command_registration const arm_exec_command_handlers[] = {
 	{
 		"semihosting",
@@ -8073,52 +8263,6 @@ riscv_get_register_on_hart(struct target *const target,
 	LOG_DEBUG("%s: [%d] %s: %" PRIx64, target_name(target), hartid, gdb_regno_name(regid), *value);
 	return err;
 }
-
-/** @return error code*/
-static int
-register_get(struct reg *const reg)
-{
-	assert(reg);
-	riscv_reg_info_t *const reg_info = reg->arch_info;
-	assert(reg_info);
-	struct target *const target = reg_info->target;
-	uint64_t value;
-	{
-		int const error_code = riscv_get_register(target, &value, reg->number);
-
-		if (ERROR_OK != error_code)
-			return error_code;
-	}
-
-	buf_set_u64(reg->value, 0, reg->size, value);
-	return ERROR_OK;
-}
-
-/** @return error code*/
-static int
-register_set(struct reg *const reg,
-	uint8_t *const buf)
-{
-	assert(reg);
-	assert(buf);
-	uint64_t const value = buf_get_u64(buf, 0, reg->size);
-
-	riscv_reg_info_t *const reg_info = reg->arch_info;
-	struct target *const target = reg_info->target;
-	assert(target);
-	LOG_DEBUG("%s: write 0x%" PRIx64 " to %s", target_name(target), value, reg->name);
-	struct reg *r = &target->reg_cache->reg_list[reg->number];
-	assert(r);
-	r->valid = true;
-	assert(r->value);
-	memcpy(r->value, buf, (r->size + 7) / 8);
-	return riscv_set_register(target, reg->number, value);
-}
-
-static struct reg_arch_type const riscv_reg_arch_type = {
-	.get = register_get,
-	.set = register_set
-};
 
 struct target_type riscv_target = {
 	.name = "riscv",

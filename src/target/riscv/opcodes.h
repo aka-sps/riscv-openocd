@@ -4,50 +4,29 @@
 #include "encoding.h"
 #include <stdint.h>
 #include <assert.h>
+#include <limits.h>
 
 static inline uint32_t
+__attribute__((const))
 bits(uint32_t const value,
 	unsigned const hi,
 	unsigned const lo)
 {
+	assert(lo <= hi && hi < CHAR_BIT * sizeof(uint32_t));
 	return (value >> lo) & ((1 << (hi + 1 - lo)) - 1);
 }
 
 static inline uint32_t
+__attribute__((const))
 bit(uint32_t const value,
-	const unsigned b)
+	unsigned const b)
 {
+	assert(b < CHAR_BIT * sizeof(uint32_t));
 	return 1 & (value >> b);
 }
 
-/**
-	@bug imm is int32_t
-*/
 static inline uint32_t
-jal(unsigned const rd,
-	uint32_t const imm)
-{
-	assert(rd < 32);
-	return
-		bit(imm, 20) << 31 |
-		bits(imm, 10, 1) << 21 |
-		bit(imm, 11) << 20 |
-		bits(imm, 19, 12) << 12 |
-		rd << 7 |
-		MATCH_JAL;
-}
-
-static inline uint32_t
-csrsi(unsigned const csr,
-	uint16_t const imm)
-{
-	return
-		csr << 20 |
-		bits(imm, 4, 0) << 15 |
-		MATCH_CSRRSI;
-}
-
-static inline uint32_t
+__attribute__((const))
 sw(unsigned const src,
 	unsigned const base,
 	uint16_t const offset)
@@ -62,20 +41,7 @@ sw(unsigned const src,
 }
 
 static inline uint32_t
-sd(unsigned const src,
-	unsigned const base,
-	uint16_t const offset)
-{
-	assert(src < 32 && base < 32);
-	return
-		bits(offset, 11, 5) << 25 |
-		src << 20 |
-		base << 15 |
-		bits(offset, 4, 0) << 7 |
-		MATCH_SD;
-}
-
-static inline uint32_t
+__attribute__((const))
 sh(unsigned const src,
 	unsigned const base,
 	uint16_t const offset)
@@ -90,6 +56,7 @@ sh(unsigned const src,
 }
 
 static inline uint32_t
+__attribute__((const))
 sb(unsigned const src,
 	unsigned const base,
 	uint16_t const offset)
@@ -103,26 +70,12 @@ sb(unsigned const src,
 		MATCH_SB;
 }
 
-/**
-@bug @c offset should be signed
-*/
-static inline uint32_t
-ld(unsigned const rd,
-	unsigned const base,
-	uint16_t const offset)
-{
-	assert(rd < 32 && base < 32);
-	return
-		bits(offset, 11, 0) << 20 |
-		base << 15 |
-		bits(rd, 4, 0) << 7 |
-		MATCH_LD;
-}
 
 /**
 @bug @c offset should be signed
 */
 static inline uint32_t
+__attribute__((const))
 lw(unsigned const rd,
 	unsigned const base,
 	uint16_t const offset)
@@ -139,6 +92,7 @@ lw(unsigned const rd,
 @bug @c offset should be signed
 */
 static inline uint32_t
+__attribute__((const))
 lh(unsigned const rd,
 	unsigned const base,
 	uint16_t const offset)
@@ -155,6 +109,7 @@ lh(unsigned const rd,
 @bug @c offset should be signed
 */
 static inline uint32_t
+__attribute__((const))
 lb(unsigned const rd,
 	unsigned const base,
 	uint16_t const offset)
@@ -168,17 +123,7 @@ lb(unsigned const rd,
 }
 
 static inline uint32_t
-csrw(unsigned const source,
-	unsigned const csr)
-{
-	assert(source < 32);
-	return
-		csr << 20 |
-		source << 15 |
-		MATCH_CSRRW;
-}
-
-static inline uint32_t
+__attribute__((const))
 addi(unsigned const dest,
 	unsigned const src,
 	uint16_t const imm)
@@ -191,21 +136,8 @@ addi(unsigned const dest,
 		MATCH_ADDI;
 }
 
-/**
-@bug @c csr is 12 bits only
-*/
 static inline uint32_t
-csrr(unsigned const rd,
-	unsigned const csr)
-{
-	assert(rd < 32);
-	return
-		csr << 20 |
-		rd << 7 |
-		MATCH_CSRRS;
-}
-
-static inline uint32_t
+__attribute__((const))
 csrrs(unsigned const rd,
 	unsigned const rs,
 	unsigned const csr)
@@ -219,6 +151,7 @@ csrrs(unsigned const rd,
 }
 
 static inline uint32_t
+__attribute__((const))
 csrrw(unsigned const rd,
 	unsigned const rs,
 	unsigned const csr)
@@ -232,20 +165,7 @@ csrrw(unsigned const rd,
 }
 
 static inline uint32_t
-fsw(unsigned const src,
-	unsigned const base,
-	uint16_t const offset)
-{
-	assert(src < 32 && base < 32);
-	return
-		bits(offset, 11, 5) << 25 |
-		bits(src, 4, 0) << 20 |
-		base << 15 |
-		bits(offset, 4, 0) << 7 |
-		MATCH_FSW;
-}
-
-static inline uint32_t
+__attribute__((const))
 fsd(unsigned const src,
 	unsigned const base,
 	uint16_t const offset)
@@ -260,19 +180,7 @@ fsd(unsigned const src,
 }
 
 static inline uint32_t
-flw(unsigned const dest,
-	unsigned const base,
-	uint16_t const offset)
-{
-	assert(dest < 32 && base < 32);
-	return
-		bits(offset, 11, 0) << 20 |
-		base << 15 |
-		bits(dest, 4, 0) << 7 |
-		MATCH_FLW;
-}
-
-static inline uint32_t
+__attribute__((const))
 fld(unsigned const dest,
 	unsigned const base,
 	uint16_t const offset)
@@ -286,6 +194,7 @@ fld(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 fmv_x_w(unsigned const dest,
 	unsigned const src)
 {
@@ -297,6 +206,7 @@ fmv_x_w(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 fmv_x_d(unsigned const dest,
 	unsigned const src)
 {
@@ -308,6 +218,7 @@ fmv_x_d(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 fmv_w_x(unsigned const dest,
 	unsigned const src)
 {
@@ -319,6 +230,7 @@ fmv_w_x(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 fmv_d_x(unsigned const dest,
 	unsigned const src)
 {
@@ -330,24 +242,28 @@ fmv_d_x(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 ebreak(void)
 {
 	return MATCH_EBREAK;
 }
 
 static inline uint16_t
+__attribute__((const))
 ebreak_c(void)
 {
 	return MATCH_C_EBREAK;
 }
 
 static inline uint32_t
+__attribute__((const))
 wfi(void)
 {
 	return MATCH_WFI;
 }
 
 static inline uint32_t
+__attribute__((const))
 fence_i(void)
 {
 	return MATCH_FENCE_I;
@@ -357,6 +273,7 @@ fence_i(void)
 @bug @c imm should be signed
 */
 static inline uint32_t
+__attribute__((const))
 lui(unsigned const dest,
 	uint32_t const imm)
 {
@@ -368,6 +285,7 @@ lui(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 xori(unsigned const dest,
 	unsigned const src,
 	uint16_t const imm)
@@ -381,6 +299,7 @@ xori(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 srli(unsigned const dest,
 	unsigned const src,
 	uint8_t const shamt)
@@ -394,12 +313,14 @@ srli(unsigned const dest,
 }
 
 static inline uint32_t
+__attribute__((const))
 fence(void)
 {
 	return MATCH_FENCE;
 }
 
 static inline uint32_t
+__attribute__((const))
 auipc(unsigned dest)
 {
 	assert(dest < 32);
