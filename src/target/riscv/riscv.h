@@ -13,11 +13,6 @@
 #define FIELD_SET(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
 /**@}*/
 
-/* The register cache is statically allocated. */
-#define RISCV_MAX_HARTS		(32)
-#define RISCV_MAX_REGISTERS	(5000)
-#define RISCV_MAX_HWBPS		(16)
-
 /** Definitions shared by code supporting all RISC-V versions. */
 /**@{*/
 typedef uint64_t riscv_reg_t;

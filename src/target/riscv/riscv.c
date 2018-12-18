@@ -74,6 +74,12 @@
 
 #define RISCV_MAX_TRIGGERS		(32)
 
+/* The register cache is statically allocated. */
+#define RISCV_MAX_HARTS		(32)
+#define RISCV_MAX_REGISTERS	(5000)
+#define RISCV_MAX_HWBPS		(16)
+
+
 /** Static array dimensions macro */
 #define DIM(x) (sizeof (x) / sizeof (x)[0])
 
