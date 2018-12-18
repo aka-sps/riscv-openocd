@@ -303,12 +303,6 @@ struct riscv_reg_info_s {
 };
 typedef struct riscv_reg_info_s riscv_reg_info_t;
 
-static int
-register_get(struct reg *const reg);
-static int
-register_set(struct reg *const reg,
-	uint8_t *const buf);
-
 struct csr_info {
 	unsigned number;
 	char const *name;
@@ -318,11 +312,6 @@ static struct csr_info csr_info[] = {
 #define DECLARE_CSR(name, number) { number, #name },
 #include "encoding.h"
 #undef DECLARE_CSR
-};
-
-static struct reg_arch_type const riscv_reg_arch_type = {
-	.get = register_get,
-	.set = register_set
 };
 
 static struct descr const description[] = {
@@ -3730,7 +3719,7 @@ gdb_regno_name(enum gdb_riscv_regno const regno)
 
 	default:
 		{
-			static char buf[32] = {[31] = '\0'};
+			static char buf[32] = {[sizeof buf - 1] = '\0'};
 
 			if (regno <= GDB_REGNO_XPR31)
 				snprintf(buf, sizeof buf - 1, "x%d", regno - GDB_REGNO_ZERO);
@@ -8125,6 +8114,11 @@ register_set(struct reg *const reg,
 	memcpy(r->value, buf, (r->size + 7) / 8);
 	return riscv_set_register(target, reg->number, value);
 }
+
+static struct reg_arch_type const riscv_reg_arch_type = {
+	.get = register_get,
+	.set = register_set
+};
 
 struct target_type riscv_target = {
 	.name = "riscv",
