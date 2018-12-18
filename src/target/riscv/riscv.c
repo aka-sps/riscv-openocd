@@ -4046,47 +4046,47 @@ riscv_fill_dmi_nop_u64(struct target *const target,
 
 /* Helper function for riscv_013_test_sba_config_reg */
 static int
+__attribute__((pure))
 get_max_sbaccess(struct target *const target)
 {
 	riscv_013_info_t const *const info = get_info(target);
 
-	bool const sbaccess128 = 0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS128);
-	bool const sbaccess64 = 0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS64);
-	bool const sbaccess32 = 0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS32);
-	bool const sbaccess16 = 0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS16);
-	bool const sbaccess8 = 0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS8);
+	bool const sbaccess8 = ;
 
-	if (sbaccess128)
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS128))
 		return 4;
-	else if (sbaccess64)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS64))
 		return 3;
-	else if (sbaccess32)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS32))
 		return 2;
-	else if (sbaccess16)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS16))
 		return 1;
-	else if (sbaccess8)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS8))
 		return 0;
-	else
-		return -1;
+
+	return -1;
 }
 
 static uint32_t
+__attribute__((pure))
 get_num_sbdata_regs(struct target *const target)
 {
 	riscv_013_info_t const *const info = get_info(target);
 
-	uint32_t const sbaccess128 = FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS128);
-	uint32_t const sbaccess64 = FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS64);
-	uint32_t const sbaccess32 = FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS32);
-
-	if (sbaccess128)
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS128))
 		return 4;
-	else if (sbaccess64)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS64))
 		return 2;
-	else if (sbaccess32)
+
+	if (0 != FIELD_GET(info->sbcs, DMI_SBCS_SBACCESS32))
 		return 1;
-	else
-		return 0;
+
+	return 0;
 }
 
 /**
