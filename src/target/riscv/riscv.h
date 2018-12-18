@@ -9,8 +9,8 @@
 /** @name Bit fields access macros
 */
 /**@{*/
-#define get_field(reg, mask) (((reg) & (mask)) / ((mask) & ~((mask) << 1)))
-#define set_field(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
+#define FIELD_GET(reg, mask) (((reg) & (mask)) / ((mask) & ~((mask) << 1)))
+#define FIELD_SET(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
 /**@}*/
 
 /* The register cache is statically allocated. */
@@ -21,12 +21,12 @@
 /** Definitions shared by code supporting all RISC-V versions. */
 /**@{*/
 typedef uint64_t riscv_reg_t;
-typedef uint32_t uint32_t;
 typedef uint64_t riscv_addr_t;
 /**@}*/
 
 /** gdb's register list is defined in riscv_gdb_reg_names gdb/riscv-tdep.c in
-* its source tree. We must interpret the numbers the same here. */
+	its source tree. We must interpret the numbers the same here.
+*/
 enum gdb_riscv_regno {
 	GDB_REGNO_ZERO = 0,        /* Read-only register, always 0.  */
 	GDB_REGNO_RA = 1,          /* Return Address.  */
@@ -201,7 +201,6 @@ riscv_step_rtos_hart(struct target *target);
 /**	Sets the current hart,
 	which is the hart that will actually be used when issuing debug commands.
 */
-/**@{*/
 static inline int
 __attribute__((warn_unused_result, pure))
 riscv_current_hartid(struct target const *const target)
@@ -210,7 +209,6 @@ riscv_current_hartid(struct target const *const target)
 	assert(rvi);
 	return rvi->current_hartid;
 }
-/**@}*/
 
 /** @returns XLEN for the given (or current) hart. */
 static inline int
@@ -232,9 +230,9 @@ riscv_xlen(struct target const *const target)
 	return riscv_xlen_of_hart(target, riscv_current_hartid(target));
 }
 
-/** Support functions for the RISC-V 'RTOS', which provides multihart support
- * without requiring multiple targets.  */
-
+/** Support functions for the RISC-V 'RTOS',
+	which provides multi-hart support without requiring multiple targets.
+*/
 static inline void
 riscv_set_rtos_hartid(struct target *const target,
 	int const hartid)
@@ -248,8 +246,11 @@ riscv_set_rtos_hartid(struct target *const target,
 
 /**@}*/
 
-/** Lists the number of harts in the system, which are assumed to be
- * consecutive and start with `mhartid=0`. */
+/** Lists the number of harts in the system,
+	which are assumed to be consecutive and start with `mhartid=0`.
+
+	@bug Bad assumption
+*/
 int
 __attribute__((pure))
 riscv_count_harts(struct target const *target);
@@ -258,7 +259,9 @@ riscv_count_harts(struct target const *target);
  * are zero extended to 64 bits.  */
  /**@{*/
 int
-riscv_set_register(struct target *target, enum gdb_riscv_regno i, riscv_reg_t v);
+riscv_set_register(struct target *target,
+	enum gdb_riscv_regno i,
+	riscv_reg_t v);
 
 int
 riscv_get_register(struct target *target, riscv_reg_t *value, enum gdb_riscv_regno r);

@@ -59,14 +59,14 @@ riscv_batch_dump_field(struct scan_field const *const field)
 	assert(field);
 	assert(field->out_value != NULL);
 	uint64_t const out_value = buf_get_u64(field->out_value, 0, field->num_bits);
-	unsigned const out_op = get_field(out_value, DTM_DMI_OP);
-	unsigned const out_data = get_field(out_value, DTM_DMI_DATA);
+	unsigned const out_op = FIELD_GET(out_value, DTM_DMI_OP);
+	unsigned const out_data = FIELD_GET(out_value, DTM_DMI_DATA);
 	unsigned const out_address = out_value >> DTM_DMI_ADDRESS_OFFSET;
 
 	if (field->in_value) {
 		uint64_t const in_value = buf_get_u64(field->in_value, 0, field->num_bits);
-		unsigned const in_op = get_field(in_value, DTM_DMI_OP);
-		unsigned const in_data = get_field(in_value, DTM_DMI_DATA);
+		unsigned const in_op = FIELD_GET(in_value, DTM_DMI_OP);
+		unsigned const in_data = FIELD_GET(in_value, DTM_DMI_DATA);
 		unsigned const in_address = in_value >> DTM_DMI_ADDRESS_OFFSET;
 
 		LOG_DEBUG("%db %s %08x @%02x -> %s %08x @%02x",
