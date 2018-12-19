@@ -14,7 +14,6 @@
 #include "jtag/jtag.h"
 #include "target/register.h"
 #include "target/breakpoints.h"
-#include "rtos/rtos.h"
 #include "rtos/riscv_debug.h"
 
 /** @file
